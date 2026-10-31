@@ -1,0 +1,7 @@
+{"items": [
+  {"metadata": {"namespace": "litellm", "name": "litellm", "labels": {"app.kubernetes.io/instance": "litellm"}},
+   "status": {"phase": "Paused", "message": "CanaryPauseStep", "pauseConditions": [{"reason": "CanaryPauseStep", "startTime": "2026-07-25T10:00:00Z"}]}},
+  {"metadata": {"namespace": "sympozium", "name": "sympozium-api"},
+   "status": {"phase": "Degraded", "abort": true, "message": "RolloutAborted: metric error-rate failed"}},
+  {"metadata": {"namespace": "x", "name": "ok"}, "status": {"phase": "Healthy"}}
+]}

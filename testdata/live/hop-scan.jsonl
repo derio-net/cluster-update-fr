@@ -1,0 +1,3 @@
+{"_time":"2026-10-31T03:00:00Z","_msg":"hop-scan result {\"image\":\"caddy:2.10.0\",\"namespace\":\"caddy-system\",\"vulnerabilities\":[{\"id\":\"CVE-2026-1000\",\"severity\":\"CRITICAL\",\"pkg\":\"golang.org/x/net\",\"installed\":\"0.30.0\",\"fixed\":\"0.33.0\",\"title\":\"http2\"}]}"}
+{"_time":"2026-10-31T03:00:01Z","_msg":"hop-scan result {\"image\":\"ghcr.io/derio-net/blog:abc1234\",\"namespace\":\"blog\",\"vulnerabilities\":[]}"}
+{"_time":"2026-10-31T03:00:02Z","_msg":"unrelated line"}

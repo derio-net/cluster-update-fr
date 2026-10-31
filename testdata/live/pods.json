@@ -1,0 +1,11 @@
+{"items": [
+  {"metadata": {"namespace": "litellm", "name": "litellm-7d9-abc", "labels": {"app.kubernetes.io/instance": "litellm"}},
+   "spec": {"containers": [{"name": "litellm", "image": "ghcr.io/berriai/litellm:v1.80.0"}], "initContainers": [{"name": "init", "image": "busybox:1.37.0"}]},
+   "status": {"phase": "Running"}},
+  {"metadata": {"namespace": "homepage", "name": "homepage-1", "labels": {"app": "homepage"}},
+   "spec": {"containers": [{"name": "homepage", "image": "ghcr.io/gethomepage/homepage:v1.4.0"}]},
+   "status": {"phase": "Running"}},
+  {"metadata": {"namespace": "upgrade-sessions", "name": "us-frank-os-1", "labels": {"fr.run/id": "frank-os-talos-1.13.4", "cluster-update.fr/type": "frank-os"}},
+   "spec": {"containers": [{"name": "shell", "image": "ghcr.io/derio-net/upgrade-session:1.0.0"}]},
+   "status": {"phase": "Failed"}}
+]}

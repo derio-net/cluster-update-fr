@@ -1,0 +1,19 @@
+{"items": [
+  {"metadata": {"namespace": "argocd", "name": "litellm"},
+   "spec": {"destination": {"namespace": "litellm"},
+            "sources": [{"repoURL": "oci://ghcr.io/berriai/litellm-helm", "chart": "litellm-helm", "targetRevision": "0.1.700"},
+                        {"repoURL": "https://github.com/derio-net/frank", "targetRevision": "main", "ref": "values"}]},
+   "status": {"sync": {"status": "Synced", "revision": "1111111111111111111111111111111111111111"},
+              "health": {"status": "Healthy"},
+              "operationState": {"phase": "Succeeded", "finishedAt": "2026-10-30T10:00:00Z",
+                                 "operation": {"sync": {"revisions": ["0.1.699", "0000000000000000000000000000000000000000"]}}},
+              "summary": {"images": ["ghcr.io/berriai/litellm:v1.80.0", "busybox:1.37.0"]},
+              "history": [{"revisions": ["0.1.699", "0000000000000000000000000000000000000000"]}]}},
+  {"metadata": {"namespace": "argocd", "name": "homepage"},
+   "spec": {"destination": {"namespace": "homepage"},
+            "source": {"repoURL": "https://github.com/derio-net/frank", "path": "apps/homepage/manifests", "targetRevision": "main"}},
+   "status": {"sync": {"status": "Synced", "revision": "2222222222222222222222222222222222222222"},
+              "health": {"status": "Healthy"},
+              "operationState": {"phase": "Succeeded", "operation": {"sync": {"revisions": ["2222222222222222222222222222222222222222"]}}},
+              "summary": {"images": ["ghcr.io/gethomepage/homepage:v1.4.0"]}}}
+]}
