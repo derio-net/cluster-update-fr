@@ -546,3 +546,18 @@ func (s *Store) Reconcile(in ReconcileInput) []Cleanup {
 	sort.Slice(out, func(i, j int) bool { return out[i].Target < out[j].Target })
 	return out
 }
+
+// Edit mutates an update record in place (descriptive fields: transcript,
+// session, rollback text). It never changes the state.
+func (s *Store) Edit(id string, fn func(*Update)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.d.Updates[id]
+	if !ok {
+		return ErrUnknown
+	}
+	st := u.State
+	fn(u)
+	u.State = st
+	return nil
+}
