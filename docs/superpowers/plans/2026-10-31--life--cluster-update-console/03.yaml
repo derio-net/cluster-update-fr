@@ -60,8 +60,8 @@ tasks:
 state:
   steps:
     P3.T1.S1:
-      state: ' '
-      ticked_at: null
+      state: x
+      ticked_at: '2026-10-31T19:51:33+00:00'
       note: null
     P3.T1.S2:
       state: ' '
