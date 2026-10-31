@@ -1,0 +1,21 @@
+# Binaries
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# fr workspace marker (never committed)
+.fr-isolation
