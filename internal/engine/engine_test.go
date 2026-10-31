@@ -410,3 +410,24 @@ func TestRolloutsAppAlwaysSession(t *testing.T) {
 		t.Fatal("a session-path item must never be auto-merged")
 	}
 }
+
+func TestItemsInAnOpenBatchAreNotSuggestedAgain(t *testing.T) {
+	f, l := &fakeForge{}, newLedger()
+	now := t0
+	e := newEngine(f, l, &now, emptyInv())
+	batch := forge.PR{Number: 100, Title: "Batch update (1): a", HeadRef: BatchBranchPrefix + "x", HeadSHA: "b",
+		Body: "- a `1.0.0` → `1.1.0` (#1)", CreatedAt: t0}
+	items := build(e, []forge.PR{pr(1, "a", "1.0.0", "1.1.0", t0), pr(2, "b", "1.0.0", "1.1.0", t0), batch}, passed())
+	s := SuggestBatch(items)
+	if len(s) != 1 || s[0].PR.Number != 2 {
+		t.Fatalf("suggested = %+v", s)
+	}
+	for _, it := range items {
+		if it.PR.Number == 1 && it.State != StateInBatch {
+			t.Errorf("state = %s", it.State)
+		}
+		if it.Batch && it.Path != frankrepo.PathBatchApprove {
+			t.Errorf("batch PR path = %s", it.Path)
+		}
+	}
+}

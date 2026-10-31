@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ const (
 	StateBatch     = "batch"         // batch-approve, awaiting the batch
 	StateSession   = "needs-session" // session path
 	StateRunbook   = "runbook"       // operator-runbook path
+	StateInBatch   = "in-batch"      // part of an open console batch PR
 )
 
 // Event is one History entry produced by the engine.
@@ -130,6 +132,8 @@ var (
 	ErrHeld           = errors.New("engine: update is held")
 )
 
+var batchRef = regexp.MustCompile(`\(#(\d+)\)`)
+
 // ItemID names the item of a Renovate PR.
 func ItemID(n int) string { return fmt.Sprintf("pr-%d", n) }
 
@@ -201,6 +205,23 @@ func (e *Engine) Build(prs []forge.PR, verdict func(forge.PR) (cidiag.Verdict, s
 		it.Rollback = Rollback(it)
 		it.State = e.state(it, now)
 		items = append(items, it)
+	}
+	// Items already carried by an open batch PR are not suggested again.
+	inBatch := map[int]int{}
+	for _, it := range items {
+		if it.Batch {
+			for _, m := range batchRef.FindAllStringSubmatch(it.PR.Body, -1) {
+				var n int
+				fmt.Sscanf(m[1], "%d", &n)
+				inBatch[n] = it.PR.Number
+			}
+		}
+	}
+	for i := range items {
+		if b, ok := inBatch[items[i].PR.Number]; ok && !items[i].Batch && items[i].State == StateBatch {
+			items[i].State = StateInBatch
+			items[i].CIDetail = fmt.Sprintf("in batch #%d", b)
+		}
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		a, b := items[i], items[j]
