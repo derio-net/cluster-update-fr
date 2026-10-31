@@ -15,3 +15,6 @@
 
 <!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P2.T3 created=2026-10-31T19:48:36+00:00 phase=2 -->
 ### no-refactor-because-P2.T3 · discovery · no-refactor-because P2.T3: engine cleanup done in the follow-up in-batch fix; merge/record paths already shared (phase 2)
+
+<!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P3.T1 created=2026-10-31T19:57:00+00:00 phase=3 -->
+### no-refactor-because-P3.T1 · discovery · no-refactor-because P3.T1: store transition logic is one function used by Transition, Record and Reconcile (phase 3)
