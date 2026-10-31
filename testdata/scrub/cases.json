@@ -460,7 +460,8 @@
         "p#ss1234"
       ],
       "in": [
-        "password: p#ss", "1234"
+        "password: p#ss",
+        "1234"
       ]
     },
     {
@@ -540,7 +541,8 @@
         "a#b,c}d"
       ],
       "in": [
-        "secret: 'a#b,c}d",
+        "secret: 'a#",
+        "b,c}d",
         {
           "repeat": "xY7",
           "times": 4
@@ -558,6 +560,78 @@
       ],
       "in": [
         "password: \"correct horse battery staple\""
+      ]
+    },
+    {
+      "name": "block style next line",
+      "kinds": [
+        "yaml-secret"
+      ],
+      "in": [
+        "token:\n    ",
+        {
+          "repeat": "kT9",
+          "times": 6
+        },
+        "\nuser: x"
+      ]
+    },
+    {
+      "name": "block style crlf",
+      "kinds": [
+        "yaml-secret"
+      ],
+      "in": [
+        "password:\r\n  ",
+        {
+          "repeat": "pW7",
+          "times": 6
+        }
+      ]
+    },
+    {
+      "name": "block style quoted next line",
+      "kinds": [
+        "yaml-secret"
+      ],
+      "in": [
+        "secret:\n  \"",
+        {
+          "repeat": "sE5",
+          "times": 6
+        },
+        "\""
+      ]
+    },
+    {
+      "name": "unclosed double quote",
+      "kinds": [
+        "yaml-secret"
+      ],
+      "in": [
+        "token: \"",
+        {
+          "repeat": "kT9",
+          "times": 6
+        },
+        " and more"
+      ]
+    },
+    {
+      "name": "unclosed single quote",
+      "kinds": [
+        "yaml-secret"
+      ],
+      "leaks": [
+        "and more"
+      ],
+      "in": [
+        "secret: '",
+        {
+          "repeat": "sE5",
+          "times": 6
+        },
+        " and more"
       ]
     }
   ],
@@ -608,5 +682,131 @@
         "times": 4
       }
     ]
+  ],
+  "_comment_literal": [
+    "`literal` cases exercise the first layer: `secret` (segments) is registered in a redaction set under",
+    "`kind`; `in` may then use {\"ref\": F} segments where F is raw | base64 | base64url | rawbase64 | query |",
+    "line:N (the Nth line of a multi-line secret) | line-base64:N. After redaction no form of the secret",
+    "(and no line of 8+ chars) may survive, and «redacted:<kind>» must appear. These shapes match no pattern."
+  ],
+  "literal": [
+    {
+      "name": "inside a sentence",
+      "kind": "gitea-token",
+      "secret": [
+        {
+          "repeat": "q7Zm",
+          "times": 4
+        }
+      ],
+      "in": [
+        "the runner said ",
+        {
+          "ref": "raw"
+        },
+        " was rejected"
+      ]
+    },
+    {
+      "name": "base64 encoded",
+      "kind": "github-token",
+      "secret": [
+        {
+          "repeat": "Hn3p",
+          "times": 5
+        }
+      ],
+      "in": [
+        "data: {\"auth\": \"",
+        {
+          "ref": "base64"
+        },
+        "\"}"
+      ]
+    },
+    {
+      "name": "url-safe base64 unpadded",
+      "kind": "github-token",
+      "secret": [
+        {
+          "repeat": "Hn3p?>",
+          "times": 5
+        }
+      ],
+      "in": [
+        "x=",
+        {
+          "ref": "rawbase64url"
+        }
+      ]
+    },
+    {
+      "name": "url escaped",
+      "kind": "telegram-bot-token",
+      "secret": [
+        "bot/",
+        {
+          "repeat": "a+b c",
+          "times": 4
+        }
+      ],
+      "in": [
+        "GET /path?t=",
+        {
+          "ref": "query"
+        },
+        "&x=1"
+      ]
+    },
+    {
+      "name": "split across a yaml block",
+      "kind": "talosconfig",
+      "secret": [
+        "line-one-",
+        {
+          "repeat": "Aa1",
+          "times": 6
+        },
+        "\nline-two-",
+        {
+          "repeat": "Bb2",
+          "times": 6
+        }
+      ],
+      "in": [
+        "contexts:\n  frank:\n    material: |\n      ",
+        {
+          "ref": "line:1"
+        },
+        "\n      ",
+        {
+          "ref": "line:2"
+        },
+        "\n"
+      ]
+    },
+    {
+      "name": "one line base64",
+      "kind": "omni-sa-key",
+      "secret": [
+        "first-",
+        {
+          "repeat": "Cc3",
+          "times": 6
+        },
+        "\nsecond-",
+        {
+          "repeat": "Dd4",
+          "times": 6
+        }
+      ],
+      "in": [
+        "blob ",
+        {
+          "ref": "line-base64:2"
+        },
+        " end"
+      ]
+    }
   ]
 }

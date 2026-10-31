@@ -1,19 +1,32 @@
 // Package scrub redacts credentials from any text the console stores, logs,
 // renders or sends (R25): logs, session transcripts, PR bodies, Telegram
-// messages and console pages all pass through String.
+// messages and console pages all pass through it.
 //
-// The fixtures in testdata/scrub/cases.json are shared with derio-net/frank's
-// scripts/life_scrub.py; keep the two pattern sets in step.
+// Two layers, in this order:
 //
-// Two rules keep the table free of bypasses (RE2 has no lookaround):
+//  1. Literal set (literal.go) — the FIRST line of defence. Every credential
+//     the console holds or injects (GitHub App token, Gitea token, Telegram
+//     bot token, each session's Omni SA key, talosconfig and kubeconfig
+//     material) is registered with its exact value plus derived forms
+//     (base64 variants, URL escapes, each line of a multi-line value). Known
+//     secrets are replaced wherever they appear, in any shape. Process-wide
+//     credentials go through Register; each session gets its own Set whose
+//     parent is the process-wide one.
+//  2. Patterns (this file) — the SECOND line, for secrets the console never
+//     saw (a token an agent pasted, a key printed by a tool).
+//
+// The pattern fixtures in testdata/scrub/cases.json are shared with
+// derio-net/frank's scripts/life_scrub.py; keep the two pattern sets in step.
+//
+// Rules that keep the pattern table free of bypasses (RE2 has no lookaround):
 //   - no pattern CONSUMES a boundary character — boundaries are checked in
 //     code against the bytes around the match, so a match never eats the
 //     separator its neighbour needs;
 //   - no pattern is anchored to end of line — a value ends at whitespace, a
-//     quote, a comma or a closing brace, so trailing comments, JSON and
-//     inline maps are covered.
+//     quote or (trimmed in code) a trailing comma or brace;
+//   - over-redaction is preferred to under-redaction: floors are low.
 //
-// String also repeats until stable, so a token whose left boundary was the
+// Redaction repeats until stable, so a token whose left boundary was the
 // tail of an adjacent token is caught on the next pass.
 package scrub
 
@@ -65,10 +78,21 @@ var patterns = []pattern{
 	// "`token:`/`client-key-data:`" is not a pair); a trailing ',' or '}'
 	// is trimmed in code. Floors are low on purpose: over-redaction is the
 	// safe failure here.
-	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?\s*[:=]\s*"([^"\n]{8,})"`)},
-	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?\s*[:=]\s*'([^'\n]{8,})'`)},
-	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?[ \t]*[:=][ \t]*([^\s"'` + "`" + `]{8,})`), trimRight: ",}"},
+	//
+	// A value may sit on the NEXT, indented line (YAML block style), hence
+	// sep. An opening quote with no closing quote on its line redacts to end
+	// of line (the unclosed-quote fallbacks run after the closed forms, and an
+	// already-redacted value is skipped by isMarker).
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `"([^"\n]{8,})"`)},
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `'([^'\n]{8,})'`)},
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `"([^"\n]{8,})`)},
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `'([^'\n]{8,})`)},
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `([^\s"'` + "`" + `]{8,})`), trimRight: ",}"},
 }
+
+// sep is the key/value separator: ':' or '=', optionally followed by a line
+// break and the indentation of a block-style value.
+const sep = `[ \t]*[:=][ \t]*(?:\r?\n[ \t]+)?`
 
 // classifyEyJ tells an Omni service-account key (base64 JSON carrying a PGP
 // private key) from a JWT; both are redacted.
@@ -165,23 +189,14 @@ func apply(text string, seen func(kind string)) string {
 	return text
 }
 
-// String returns text with every credential replaced by «redacted:<kind>».
-// It is idempotent.
-func String(text string) string { return apply(text, func(string) {}) }
+// String returns text with every credential replaced by «redacted:<kind>»:
+// first the process-wide literal set (Register), then every pattern. It is
+// idempotent.
+func String(text string) string { return global.String(text) }
 
 // Find returns the kinds of credential present in text, without duplicates,
 // in the order String would redact them. nil means clean.
-func Find(text string) []string {
-	var kinds []string
-	seen := map[string]bool{}
-	apply(text, func(k string) {
-		if !seen[k] {
-			seen[k] = true
-			kinds = append(kinds, k)
-		}
-	})
-	return kinds
-}
+func Find(text string) []string { return global.Find(text) }
 
 type writer struct{ w io.Writer }
 
