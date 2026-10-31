@@ -1,0 +1,57 @@
+{{define "needs-action.html"}}{{template "head" .}}
+{{$csrf := .CSRF}}
+<h2>🔴 Security</h2>
+{{range .Security}}{{template "item" (item . $csrf)}}{{else}}<p class="empty">No security items.</p>{{end}}
+
+<h2>📦 Suggested batch</h2>
+{{if .Suggested}}
+<form method="post" action="/act/approve-batch" class="card">
+<input type="hidden" name="csrf" value="{{$csrf}}">
+<p class="meta">Untick anything to leave it out; one PR is opened with the rest. Rollback: one-click revert PR from History.</p>
+{{range .Suggested}}<div><label><input type="checkbox" name="id" value="{{.ID}}" checked> <b>{{.Name}}</b> <code>{{.From}}</code> → <code>{{.To}}</code> <span class="meta">#{{.PR.Number}} · CI {{.CI}}</span></label></div>{{end}}
+<button class="primary">Approve batch</button>
+</form>
+{{else}}<p class="empty">Nothing routine is waiting.</p>{{end}}
+
+<h2>⏱ Auto-merge countdowns</h2>
+{{range .Countdowns}}{{template "item" (item . $csrf)}}{{else}}<p class="empty">No countdowns.</p>{{end}}
+
+<h2>🧭 Guided upgrades</h2>
+{{range .Guided}}
+<div class="card">
+<div><b>{{.Cluster}} {{.Kind}} {{.From}} → {{.To}}</b> <span class="meta">step {{.Position}} · talosctl {{.TalosClient}}, kubectl {{.KubectlClient}} pinned</span></div>
+{{if .OneWay}}<div class="warn">ONE-WAY: a Kubernetes minor cannot be rolled back.</div>{{end}}
+<div class="rollback"><b>Rollback:</b> {{.Rollback}}</div>
+{{if .Session}}<a href="/attach/{{.ID}}">Attach to the running session</a> {{template "btn" (btn "end-session" .ID $csrf "End session" "danger")}}{{else}}{{template "btn" (btn "start-session" .ID $csrf "Start session" "primary")}}{{end}}
+</div>
+{{else}}<p class="empty">Both clusters are on the newest OS releases.</p>{{end}}
+{{range .SessionItems}}{{template "item" (item . $csrf)}}{{end}}
+{{with .Omni}}
+<div class="card">
+<div><b>Omni</b> <span class="meta">running {{or .Running "unknown"}} · latest {{or .Latest "unknown"}}{{if .Gap}} · {{.Gap}} behind{{end}}</span></div>
+<div class="rollback">Upgraded by the operator from the laptop, backup first — <a href="https://github.com/derio-net/frank/blob/main/docs/runbooks/omni-upgrade.md">operator runbook</a>. The console only tracks it.</div>
+</div>
+{{end}}
+
+<h2>🚦 Rollouts waiting for a decision</h2>
+{{range .Rollouts}}
+<div class="card">
+<div><b>{{.Cluster}} {{.Namespace}}/{{.Name}}</b> <span class="{{if .Aborted}}bad{{else}}warn{{end}}">{{.Phase}}{{if .Aborted}} (aborted){{end}}</span></div>
+<div class="meta">{{.Message}}{{if not .PausedSince.IsZero}} · paused since {{when .PausedSince}}{{end}} — a canary pause never expires.</div>
+<div class="rollback"><b>Rollback:</b> abort returns traffic to the stable ReplicaSet; promote/abort is decided inside a session.</div>
+{{template "btn" (btn "start-session" .UpgradeID $csrf "Start session" "primary")}}
+</div>
+{{else}}<p class="empty">No paused or aborted rollouts.</p>{{end}}
+
+<h2>⚠️ Held — CI</h2>
+{{range .HeldCI}}{{template "item" (item . $csrf)}}{{else}}<p class="empty">Nothing is held for CI.</p>{{end}}
+
+{{if .Sessions}}<h2>Running sessions</h2>
+<table><tr><th>Upgrade</th><th>Type</th><th>Started</th><th>Step</th><th></th></tr>
+{{range .Sessions}}<tr><td>{{.ID}}</td><td>{{.Type}}</td><td>{{when .StartedAt}}</td><td>{{if .StepRunning}}{{.StepName}} (idle clock paused){{else}}—{{end}}</td>
+<td><a href="/attach/{{.ID}}">Attach</a> {{template "btn" (btn "end-session" .ID $csrf "End" "danger")}}</td></tr>{{end}}</table>{{end}}
+
+{{if .Alarms}}<h2>Open security alarms</h2>
+<table><tr><th>Severity</th><th>Vulnerability</th><th>Component</th><th>Fix</th><th>Deadline</th></tr>
+{{range .Alarms}}<tr><td class="{{sevclass .Severity}}">{{.Severity}}</td><td>{{.VulnID}} {{.Package}}</td><td>{{.Component}}</td><td>{{or .Fixed "none yet"}}</td><td>{{when .Deadline}}</td></tr>{{end}}</table>{{end}}
+{{template "foot" .}}{{end}}

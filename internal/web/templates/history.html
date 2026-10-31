@@ -1,0 +1,19 @@
+{{define "history.html"}}{{template "head" .}}
+{{$csrf := .CSRF}}
+<h2>Updates</h2>
+<table>
+<tr><th>Update</th><th>State</th><th>Approved by</th><th>PR</th><th>Rollout</th><th>Verification</th><th></th></tr>
+{{range .Updates}}
+<tr><td><b>{{or .Title .ID}}</b><div class="meta">{{.ID}}{{if .Reason}} · {{.Reason}}{{end}}</div>{{if .Transcript}}<details><summary class="meta">transcript (scrubbed)</summary><pre>{{.Transcript}}</pre></details>{{end}}</td>
+<td class="{{if eq (print .State) "verified"}}ok{{else if eq (print .State) "failed"}}bad{{end}}">{{.State.Label}}</td>
+<td>{{or .Approver "—"}}</td>
+<td>{{if .PR}}<a href="https://github.com/derio-net/frank/pull/{{.PR}}">#{{.PR}}</a>{{end}}</td>
+<td class="meta">{{.Rollout}}</td><td class="meta">{{.Verification}}</td>
+<td>{{if and .PR (or (eq (print .State) "merged") (eq (print .State) "applied") (eq (print .State) "verified") (eq (print .State) "failed"))}}{{template "btn" (btn "revert" .ID $csrf "Revert" "danger")}}{{end}}</td></tr>
+{{else}}<tr><td colspan="7" class="empty">No updates yet.</td></tr>{{end}}
+</table>
+<h2>Events</h2>
+<table><tr><th>When</th><th>Update</th><th>Action</th><th>By</th><th>Detail</th></tr>
+{{range .History}}<tr><td>{{when .At}}</td><td>{{.Update}}</td><td>{{.Action}}{{if .To}} → {{.To}}{{end}}</td><td>{{.By}}</td><td class="meta">{{.Reason}}{{if .PR}} #{{.PR}}{{end}}</td></tr>{{end}}
+</table>
+{{template "foot" .}}{{end}}
