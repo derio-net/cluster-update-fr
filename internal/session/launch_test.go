@@ -271,3 +271,21 @@ func TestBadRequests(t *testing.T) {
 		t.Error("no session image configured must refuse, not start an unpinned pod")
 	}
 }
+
+type brokenKube struct{ *fakeKube }
+
+func (brokenKube) Get(context.Context, string, any) error {
+	return &kube.APIError{Code: 503, Reason: "ServiceUnavailable"}
+}
+
+func TestAPIErrorBeforeCreateReleasesTheLock(t *testing.T) {
+	now := time.Unix(1000, 0)
+	l := launcher(t, newFake(), &now)
+	l.Kube = brokenKube{newFake()}
+	if _, _, err := l.Start(context.Background(), req("pr-1", TypeStateful, "gitea")); err == nil {
+		t.Fatal("want error")
+	}
+	if h := (Locks{Store: l.Store}).Holder(Target(TypeStateful, "frank", "gitea")); h != "" {
+		t.Errorf("lock leaked to %q", h)
+	}
+}

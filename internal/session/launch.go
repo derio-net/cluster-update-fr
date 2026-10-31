@@ -170,17 +170,25 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	if err := locks.Acquire(target, req.UpgradeID); err != nil {
 		return Record{}, false, err
 	}
+	// An error before anything exists must not leave the lock held.
+	release := func() {
+		if _, ok := l.Get(req.UpgradeID); !ok {
+			locks.Release(target, req.UpgradeID)
+		}
+	}
 	pod := PodName(req.UpgradeID)
 	var existing struct{}
 	if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "pods", pod), &existing); err == nil {
 		rec := l.ensureRecord(req, target, pod)
 		return rec, false, nil
 	} else if !kube.IsNotFound(err) {
+		release()
 		return Record{}, false, err
 	}
 
 	token, err := randomToken()
 	if err != nil {
+		release()
 		return Record{}, false, err
 	}
 	set := scrub.NewSet(scrub.Global())
