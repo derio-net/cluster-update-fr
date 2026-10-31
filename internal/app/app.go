@@ -26,6 +26,7 @@ import (
 	"github.com/derio-net/cluster-update-fr/internal/session"
 	"github.com/derio-net/cluster-update-fr/internal/store"
 	"github.com/derio-net/cluster-update-fr/internal/tracks"
+	"github.com/derio-net/cluster-update-fr/internal/trust"
 	"github.com/derio-net/cluster-update-fr/internal/verify"
 )
 
@@ -36,6 +37,27 @@ type GitHubAPI interface {
 	PR(ctx context.Context, n int) (forge.PR, error)
 	Statuses(ctx context.Context, sha string) ([]forge.Status, error)
 	Releases(ctx context.Context, ownerRepo string) ([]string, error)
+	PRCommits(ctx context.Context, n int) ([]forge.Commit, error)
+	PRFiles(ctx context.Context, n int) ([]string, error)
+}
+
+// guardedForge routes every merge through the trust guard (re-verify, pin
+// the head SHA); everything else goes straight to GitHub.
+type guardedForge struct {
+	GitHubAPI
+	guard *trust.Guard
+}
+
+func (g guardedForge) Merge(ctx context.Context, n int, sha string) (string, error) {
+	return g.guard.MergePR(ctx, n, sha)
+}
+
+// UntrustedPR is an update-looking PR the console refuses to act on.
+type UntrustedPR struct {
+	Number int
+	Title  string
+	Author string
+	Reason string
 }
 
 // Sender posts to the #security topic.
@@ -62,6 +84,7 @@ type App struct {
 
 	once   sync.Once
 	engine *engine.Engine
+	guard  *trust.Guard
 	mu     sync.RWMutex
 	view   View
 	smoke  map[string]verify.SmokeResult
@@ -87,6 +110,7 @@ type View struct {
 	Decl       *frankrepo.Declarations
 	Inventory  *inventory.Inventory
 	Items      []engine.Item
+	Untrusted  []UntrustedPR
 	Suggested  []engine.Item
 	Rollouts   []RolloutView
 	Guided     []GuidedStep
@@ -129,7 +153,13 @@ func (a *App) logf(format string, args ...any) {
 
 func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 	a.once.Do(func() {
-		a.engine = &engine.Engine{Forge: a.GitHub, Ledger: a.Store, Now: a.now}
+		a.guard = &trust.Guard{Cfg: a.trustConfig()}
+		var f engine.Forge
+		if a.GitHub != nil {
+			a.guard.API, a.guard.Merge = a.GitHub, a.GitHub.Merge
+			f = guardedForge{GitHubAPI: a.GitHub, guard: a.guard}
+		}
+		a.engine = &engine.Engine{Forge: f, Ledger: a.Store, Now: a.now}
 		if a.Diag != nil {
 			web := a.Cfg.GiteaURL
 			a.engine.Diagnose = func(ctx context.Context, pr forge.PR) cidiag.Diagnosis { return cidiag.Diagnose(ctx, a.Diag, pr, web) }
@@ -140,6 +170,76 @@ func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 	})
 	a.engine.Policy = policy
 	return a.engine
+}
+
+func (a *App) trustConfig() trust.Config {
+	return trust.Config{Repo: a.Cfg.FrankRepo, RenovateBot: a.Cfg.RenovateBot, ConsoleBot: a.Cfg.ConsoleBot, Committers: a.Cfg.TrustedCommitters}
+}
+
+// trusted keeps the items whose PR passes every trust condition, lists the
+// rest as untrusted, and hands the verified scopes to the merge guard.
+func (a *App) trusted(ctx context.Context, items []engine.Item, cache map[string]error) ([]engine.Item, []UntrustedPR) {
+	if a.GitHub == nil {
+		return nil, nil
+	}
+	cfg := a.trustConfig()
+	scopes := map[int]trust.Scope{}
+	check := func(it engine.Item, scope trust.Scope) error {
+		key := fmt.Sprintf("%d@%s", it.PR.Number, it.PR.HeadSHA)
+		if err, ok := cache[key]; ok {
+			return err
+		}
+		err := cfg.Check(ctx, a.GitHub, it.PR, scope)
+		cache[key] = err
+		return err
+	}
+	var kept []engine.Item
+	var bad []UntrustedPR
+	refuse := func(it engine.Item, err error) {
+		bad = append(bad, UntrustedPR{Number: it.PR.Number, Title: trust.Title(it.PR.Title), Author: trust.Title(it.PR.Author), Reason: scrub.String(err.Error())})
+	}
+	for _, it := range items {
+		if it.Batch {
+			continue
+		}
+		scope := trust.ScopeFor(it)
+		if err := check(it, scope); err != nil {
+			refuse(it, err)
+			continue
+		}
+		scopes[it.PR.Number] = scope
+		kept = append(kept, it)
+	}
+	for _, it := range items {
+		if !it.Batch {
+			continue
+		}
+		var member []trust.Scope
+		var err error
+		for _, n := range engine.BatchMembers(it.PR.Body) {
+			sc, ok := scopes[n]
+			if !ok {
+				err = fmt.Errorf("batch member #%d is not an open, trusted Renovate PR", n)
+				break
+			}
+			member = append(member, sc)
+		}
+		if err == nil && len(member) == 0 {
+			err = errors.New("batch PR lists no members")
+		}
+		scope := trust.Union(member...)
+		if err == nil {
+			err = check(it, scope)
+		}
+		if err != nil {
+			refuse(it, err)
+			continue
+		}
+		scopes[it.PR.Number] = scope
+		kept = append(kept, it)
+	}
+	a.guard.SetScopes(scopes)
+	return kept, bad
 }
 
 // View returns the last cycle's view.
@@ -242,7 +342,9 @@ func (a *App) Cycle(ctx context.Context) View {
 		}
 		return cidiag.Evaluate(st, p.UpdatedAt, now, a.Cfg.CITimeout)
 	}
-	items := e.Build(prs, verdict)
+	trustCache := map[string]error{}
+	items, untrusted := a.trusted(ctx, e.Build(prs, verdict), trustCache)
+	v.Untrusted = untrusted
 	for _, it := range items {
 		u := store.Update{ID: it.ID, Title: it.PR.Title, Cluster: it.Cluster, Kind: it.Kind, Name: it.Name, From: it.From, To: it.To,
 			Path: it.Path, PR: it.PR.Number, Rollback: it.Rollback}
@@ -257,7 +359,7 @@ func (a *App) Cycle(ctx context.Context) View {
 	if err := e.Tick(ctx, items); err != nil {
 		fail("merge", err)
 	}
-	items = e.Build(prs, verdict) // states after this tick's merges/holds
+	items, _ = a.trusted(ctx, e.Build(prs, verdict), trustCache) // states after this tick's merges/holds
 	v.Items = items
 	v.Suggested = engine.SuggestBatch(items)
 

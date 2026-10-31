@@ -41,6 +41,13 @@ type PR struct {
 	Merged         bool
 	MergeCommitSHA string
 	URL            string
+	HeadRepo       string // owner/name the head branch lives in ("" = deleted fork)
+	BaseRepo       string
+	BaseRef        string
+}
+
+type ghRepo struct {
+	FullName string `json:"full_name"`
 }
 
 // HasLabel reports whether the PR carries label.
@@ -64,9 +71,14 @@ type ghPR struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Head      struct {
-		SHA string `json:"sha"`
-		Ref string `json:"ref"`
+		SHA  string  `json:"sha"`
+		Ref  string  `json:"ref"`
+		Repo *ghRepo `json:"repo"`
 	} `json:"head"`
+	Base struct {
+		Ref  string  `json:"ref"`
+		Repo *ghRepo `json:"repo"`
+	} `json:"base"`
 	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
@@ -86,6 +98,13 @@ func (p ghPR) pr() PR {
 	for _, l := range p.Labels {
 		out.Labels = append(out.Labels, l.Name)
 	}
+	if p.Head.Repo != nil {
+		out.HeadRepo = p.Head.Repo.FullName
+	}
+	if p.Base.Repo != nil {
+		out.BaseRepo = p.Base.Repo.FullName
+	}
+	out.BaseRef = p.Base.Ref
 	return out
 }
 
@@ -352,6 +371,64 @@ func (g *GitHub) Releases(ctx context.Context, ownerRepo string) ([]string, erro
 	for _, r := range raw {
 		if !r.Draft && !r.Prerelease {
 			out = append(out, r.Tag)
+		}
+	}
+	return out, nil
+}
+
+// Commit is one commit of a pull request with its GitHub identities.
+type Commit struct {
+	SHA       string
+	Author    string // GitHub login of the author ("" if not linked)
+	Committer string // GitHub login of the committer ("" if not linked)
+}
+
+// PRCommits lists a pull request's commits (GitHub caps the list at 250).
+func (g *GitHub) PRCommits(ctx context.Context, n int) ([]Commit, error) {
+	var raw []struct {
+		SHA    string `json:"sha"`
+		Author *struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Committer *struct {
+			Login string `json:"login"`
+		} `json:"committer"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/pulls/%d/commits?per_page=100", n)), nil, &raw, false); err != nil {
+		return nil, err
+	}
+	out := make([]Commit, 0, len(raw))
+	for _, c := range raw {
+		x := Commit{SHA: c.SHA}
+		if c.Author != nil {
+			x.Author = c.Author.Login
+		}
+		if c.Committer != nil {
+			x.Committer = c.Committer.Login
+		}
+		out = append(out, x)
+	}
+	return out, nil
+}
+
+// PRFiles lists the paths a pull request changes (first 100; more is
+// reported as an error so the caller can refuse to trust it).
+func (g *GitHub) PRFiles(ctx context.Context, n int) ([]string, error) {
+	var raw []struct {
+		Filename         string `json:"filename"`
+		PreviousFilename string `json:"previous_filename"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/pulls/%d/files?per_page=100", n)), nil, &raw, false); err != nil {
+		return nil, err
+	}
+	if len(raw) >= 100 {
+		return nil, fmt.Errorf("forge: PR #%d changes 100 or more files", n)
+	}
+	var out []string
+	for _, f := range raw {
+		out = append(out, f.Filename)
+		if f.PreviousFilename != "" {
+			out = append(out, f.PreviousFilename)
 		}
 	}
 	return out, nil

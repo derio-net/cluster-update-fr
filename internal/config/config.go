@@ -52,6 +52,11 @@ type Config struct {
 	SessionSecretDir string // directory of per-type credential files (mounted by frank)
 	RunsFrURL        string // attach UI base URL
 
+	// PR trust (the frank repo is public): only PRs by these bots are acted on.
+	RenovateBot       string   // login of the Renovate GitHub App bot, e.g. "renovate-frank[bot]"
+	ConsoleBot        string   // login of the console's GitHub App bot (batch PRs)
+	TrustedCommitters []string // extra committer logins (GitHub's web-flow for API commits)
+
 	ScanInterval time.Duration
 	CITimeout    time.Duration
 	IdleTimeout  time.Duration
@@ -123,6 +128,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		giteaTokenFile:  getenv("GITEA_TOKEN_FILE"),
 	}
 	c.GiteaRepo = get("GITEA_REPO", c.FrankRepo)
+	c.RenovateBot = get("RENOVATE_BOT_LOGIN", "")
+	c.ConsoleBot = get("CONSOLE_BOT_LOGIN", "")
+	c.TrustedCommitters = strings.Fields(strings.ReplaceAll(get("TRUSTED_COMMITTERS", "web-flow"), ",", " "))
 
 	durations := []struct {
 		key string

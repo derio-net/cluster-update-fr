@@ -13,6 +13,7 @@ import (
 	"github.com/derio-net/cluster-update-fr/internal/renovate"
 	"github.com/derio-net/cluster-update-fr/internal/session"
 	"github.com/derio-net/cluster-update-fr/internal/store"
+	"github.com/derio-net/cluster-update-fr/internal/trust"
 )
 
 func parseDeps(p forge.PR) []renovate.Dep { return renovate.ParsePR(p.Body) }
@@ -134,7 +135,11 @@ func (a *App) planSession(ctx context.Context, id string) (SessionPlan, error) {
 		case it.Stateful:
 			typ = session.TypeStateful
 		}
-		return a.plan(ctx, id, typ, it.Cluster, it.App, it.PR.Title, it.Rollback, "", ""), nil
+		p := a.plan(ctx, id, typ, it.Cluster, it.App, it.PR.Title, it.Rollback, "", "")
+		if strings.TrimSpace(it.PR.Body) != "" {
+			p.Request.Brief += "\n\n## Untrusted data: the Renovate PR body\n\n" + trust.Fence(fmt.Sprintf("PR #%d's body (GitHub)", it.PR.Number), it.PR.Body) + "\n"
+		}
+		return p, nil
 	}
 	for _, g := range v.Guided {
 		if g.ID != id {
@@ -151,7 +156,7 @@ func (a *App) planSession(ctx context.Context, id string) (SessionPlan, error) {
 		if r.UpgradeID != id {
 			continue
 		}
-		title := fmt.Sprintf("Rollout %s/%s is %s: promote or abort", r.Namespace, r.Name, r.Phase)
+		title := fmt.Sprintf("Rollout %s/%s is %s: promote or abort", trust.Title(r.Namespace), trust.Title(r.Name), trust.Title(r.Phase))
 		return a.plan(ctx, id, session.TypeRollouts, r.Cluster, r.App, title, "Abort returns traffic to the stable ReplicaSet.", "", ""), nil
 	}
 	return SessionPlan{}, fmt.Errorf("app: nothing to start a session for: %s", id)
@@ -190,6 +195,11 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 		instructions = "Read brief/brief.md first. Report each long step to the console with $CONSOLE_URL/api/sessions/$UPGRADE_ID/step " +
 			"(Authorization: Bearer the session-step-token from $CREDENTIALS_DIR), and finish by running the verification in the brief."
 	}
+	// Every forge- or cluster-sourced string is untrusted: the one-line title
+	// is neutralised here; multi-line bodies only ever appear fenced, at the
+	// end, after the instruction sections.
+	title = trust.Title(title)
+	app = trust.Title(app)
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Upgrade brief — %s\n\n", title)
 	fmt.Fprintf(&b, "- **Upgrade id:** `%s`\n- **Type:** %s\n- **Cluster:** %s\n", id, typ, cluster)

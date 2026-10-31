@@ -289,3 +289,24 @@ func TestReleases(t *testing.T) {
 		t.Fatalf("Releases = %v %v", tags, err)
 	}
 }
+
+func TestPRProvenance(t *testing.T) {
+	srv, _ := fake(t, map[string]string{
+		"GET /repos/derio-net/frank/pulls/7":         `{"number":7,"head":{"sha":"abc","ref":"renovate/x","repo":{"full_name":"someone/frank"}},"base":{"ref":"main","repo":{"full_name":"derio-net/frank"}}}`,
+		"GET /repos/derio-net/frank/pulls/7/commits": `[{"sha":"c1","author":{"login":"renovate-frank[bot]"},"committer":{"login":"web-flow"}},{"sha":"c2","author":null,"committer":null}]`,
+		"GET /repos/derio-net/frank/pulls/7/files":   `[{"filename":"apps/x/values.yaml"},{"filename":"b","previous_filename":"a"}]`,
+	})
+	g := gh(srv, "t")
+	pr, err := g.PR(context.Background(), 7)
+	if err != nil || pr.HeadRepo != "someone/frank" || pr.BaseRepo != "derio-net/frank" || pr.BaseRef != "main" {
+		t.Fatalf("PR = %+v %v", pr, err)
+	}
+	cs, err := g.PRCommits(context.Background(), 7)
+	if err != nil || len(cs) != 2 || cs[0].Author != "renovate-frank[bot]" || cs[0].Committer != "web-flow" || cs[1].Author != "" {
+		t.Fatalf("commits = %+v %v", cs, err)
+	}
+	fs, err := g.PRFiles(context.Background(), 7)
+	if err != nil || len(fs) != 3 {
+		t.Fatalf("files = %v %v", fs, err)
+	}
+}

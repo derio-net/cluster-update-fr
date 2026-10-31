@@ -134,6 +134,17 @@ var (
 
 var batchRef = regexp.MustCompile(`\(#(\d+)\)`)
 
+// BatchMembers returns the Renovate PR numbers a console batch PR carries.
+func BatchMembers(body string) []int {
+	var out []int
+	for _, m := range batchRef.FindAllStringSubmatch(body, -1) {
+		var n int
+		fmt.Sscanf(m[1], "%d", &n)
+		out = append(out, n)
+	}
+	return out
+}
+
 // ItemID names the item of a Renovate PR.
 func ItemID(n int) string { return fmt.Sprintf("pr-%d", n) }
 
