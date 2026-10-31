@@ -15,6 +15,7 @@ import (
 	"github.com/derio-net/cluster-update-fr/internal/engine"
 	"github.com/derio-net/cluster-update-fr/internal/forge"
 	"github.com/derio-net/cluster-update-fr/internal/frankrepo"
+	"github.com/derio-net/cluster-update-fr/internal/identity"
 	"github.com/derio-net/cluster-update-fr/internal/inventory"
 	"github.com/derio-net/cluster-update-fr/internal/live"
 	"github.com/derio-net/cluster-update-fr/internal/scrub"
@@ -116,16 +117,46 @@ func view() app.View {
 	}
 }
 
+// fakeAuth stands in for identity.JWT (verified in its own package):
+// X-authentik-jwt "valid:<user>" is a verified operator, "nogroup:<user>"
+// a verified user outside the operator group, anything else unverified.
+type fakeAuth struct{}
+
+func (fakeAuth) Authenticate(r *http.Request) (identity.Identity, error) {
+	tok := r.Header.Get(identity.HeaderJWT)
+	switch {
+	case strings.HasPrefix(tok, "valid:"):
+		u := strings.TrimPrefix(tok, "valid:")
+		if plain := r.Header.Get(identity.HeaderUser); plain != "" && plain != u {
+			return identity.Identity{}, identity.ErrUnauthenticated
+		}
+		return identity.Identity{User: u, Groups: []string{"ops"}}, nil
+	case strings.HasPrefix(tok, "nogroup:"):
+		return identity.Identity{}, identity.ErrForbidden
+	}
+	return identity.Identity{}, identity.ErrUnauthenticated
+}
+
 func newServer(t *testing.T) (*fakeBackend, http.Handler) {
+	b, h := newHandlers(t)
+	return b, h.UI
+}
+
+func newHandlers(t *testing.T) (*fakeBackend, Handlers) {
 	t.Helper()
 	b := &fakeBackend{view: view(), started: map[string]bool{}}
-	return b, New(b, Options{AuthHeader: "X-authentik-username", Secret: []byte("test-secret-0123456789")})
+	return b, New(b, Options{Auth: fakeAuth{}, Secret: []byte("test-secret-0123456789")})
 }
+
+var jar = map[string]*http.Cookie{}
 
 func get(h http.Handler, path, user string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodGet, path, nil)
 	if user != "" {
-		r.Header.Set("X-authentik-username", user)
+		r.Header.Set(identity.HeaderJWT, "valid:"+user)
+	}
+	if c, ok := jar[user]; ok {
+		r.AddCookie(c)
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -136,29 +167,112 @@ func post(h http.Handler, path, user string, form url.Values) *httptest.Response
 	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if user != "" {
-		r.Header.Set("X-authentik-username", user)
+		r.Header.Set(identity.HeaderJWT, "valid:"+user)
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "cuf_flash" {
+			jar[user] = c
+		}
+	}
 	return w
 }
 
-func TestEveryPageNeedsTheTrustedHeader(t *testing.T) {
-	_, h := newServer(t)
+// flash follows a redirect and returns the page's status message.
+func flash(h http.Handler, user string) string {
+	body := get(h, "/", user).Body.String()
+	i := strings.Index(body, `<p class="msg">`)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(`<p class="msg">`):]
+	return rest[:strings.Index(rest, "</p>")]
+}
+
+func TestEveryPageNeedsAVerifiedIdentity(t *testing.T) {
+	_, hs := newHandlers(t)
+	h := hs.UI
 	for _, p := range []string{"/", "/inventory", "/history"} {
 		if w := get(h, p, ""); w.Code != http.StatusUnauthorized {
-			t.Errorf("%s without header = %d", p, w.Code)
+			t.Errorf("%s without identity = %d", p, w.Code)
 		}
 	}
-	if w := get(h, "/healthz", ""); w.Code != 200 {
-		t.Errorf("healthz = %d", w.Code)
+	// The plain username header alone is never enough.
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(identity.HeaderUser, "derio")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("bare username header = %d", w.Code)
 	}
-	if w := get(h, "/metrics", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "cluster_update_updates") {
-		t.Errorf("metrics = %d", w.Code)
+	// A verified token whose plain header disagrees.
+	r = httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(identity.HeaderJWT, "valid:derio")
+	r.Header.Set(identity.HeaderUser, "admin")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("header mismatch = %d", w.Code)
+	}
+	r = httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(identity.HeaderJWT, "nogroup:derio")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("wrong group = %d", w.Code)
 	}
 	if w := get(h, "/", "<script>alert(1)</script>"); w.Code != http.StatusUnauthorized {
 		t.Errorf("a malformed username must be refused, got %d", w.Code)
 	}
+	refusing := New(&fakeBackend{view: view()}, Options{Secret: []byte("x")})
+	if w := get(refusing.UI, "/", "derio"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("no verifier configured must fail closed, got %d", w.Code)
+	}
+}
+
+func TestListenersAreSeparate(t *testing.T) {
+	_, hs := newHandlers(t)
+	if w := get(hs.Ops, "/healthz", ""); w.Code != 200 {
+		t.Errorf("ops healthz = %d", w.Code)
+	}
+	if w := get(hs.Ops, "/metrics", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "cluster_update_updates") {
+		t.Errorf("ops metrics = %d", w.Code)
+	}
+	for _, path := range []string{"/", "/inventory", "/act/hold", "/api/sessions/x/step"} {
+		if w := post(hs.Ops, path, "derio", url.Values{"id": {"pr-4"}}); w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("ops port served %s: %d", path, w.Code)
+		}
+		if w := get(hs.Ops, path, "derio"); w.Code == 200 {
+			t.Errorf("ops port served GET %s", path)
+		}
+	}
+	for _, path := range []string{"/", "/metrics", "/act/hold"} {
+		if w := post(hs.Session, path, "derio", url.Values{"id": {"pr-4"}}); w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("session port served %s: %d", path, w.Code)
+		}
+	}
+	if w := get(hs.UI, "/metrics", "derio"); w.Code == 200 {
+		t.Error("the UI port must not serve metrics")
+	}
+}
+
+func TestMessagesCannotBeInjectedThroughTheURL(t *testing.T) {
+	_, h := newServer(t)
+	body := get(h, "/?msg=Your+session+expired,+log+in+at+evil.example&m=merged", "derio").Body.String()
+	if strings.Contains(body, "evil.example") || strings.Contains(body, `class="msg"`) {
+		t.Error("URL text was rendered as a console message")
+	}
+	// A flash cookie signed for another user is ignored.
+	b, hs := newHandlers(t)
+	_ = b
+	tok := csrfFor(t, hs.UI, "mallory")
+	post(hs.UI, "/act/hold", "mallory", url.Values{"id": {"pr-4"}, "csrf": {tok}})
+	jar["derio"] = jar["mallory"]
+	if m := flash(hs.UI, "derio"); m != "" {
+		t.Errorf("another user's flash was shown: %q", m)
+	}
+	delete(jar, "derio")
 }
 
 func TestNeedsActionPage(t *testing.T) {
@@ -260,9 +374,9 @@ func TestActionsUseTheAuthenticatedUserAndCSRF(t *testing.T) {
 		}
 	}
 	// An action error is shown, not swallowed.
-	w := post(h, "/act/merge-now", "derio", url.Values{"id": {"pr-4"}, "csrf": {tok}})
-	if loc := w.Header().Get("Location"); !strings.Contains(loc, "CI+has+not+passed") && !strings.Contains(loc, "CI%20has%20not%20passed") {
-		t.Errorf("error not surfaced: %q", loc)
+	post(h, "/act/merge-now", "derio", url.Values{"id": {"pr-4"}, "csrf": {tok}})
+	if m := flash(h, "derio"); !strings.Contains(m, "CI has not passed") {
+		t.Errorf("error not surfaced: %q", m)
 	}
 	if w := get(h, "/act/hold?id=pr-4", "derio"); w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET on an action = %d", w.Code)
@@ -284,14 +398,15 @@ func TestStartSessionTwiceAttaches(t *testing.T) {
 		}
 	}
 	b.lockErr = &session.LockedError{Target: "os:frank", Holder: "frank-os-talos-1.13.4"}
-	w3 := post(h, "/act/start-session", "derio", url.Values{"id": {"frank-os-k8s-1.36.2"}, "csrf": {tok}})
-	if !strings.Contains(w3.Header().Get("Location"), "frank-os-talos-1.13.4") {
-		t.Errorf("lock conflict must name the holder: %q", w3.Header().Get("Location"))
+	post(h, "/act/start-session", "derio", url.Values{"id": {"frank-os-k8s-1.36.2"}, "csrf": {tok}})
+	if m := flash(h, "derio"); !strings.Contains(m, "frank-os-talos-1.13.4") {
+		t.Errorf("lock conflict must name the holder: %q", m)
 	}
 }
 
 func TestSessionAPIUsesTheStepToken(t *testing.T) {
-	b, h := newServer(t)
+	b, hs := newHandlers(t)
+	h := hs.Session
 	req := func(path, token, body string) int {
 		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		if token != "" {

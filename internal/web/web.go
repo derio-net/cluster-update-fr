@@ -1,9 +1,20 @@
 // Package web serves the console's pages (R13): Needs action (Security,
 // Suggested batch, Auto-merge countdowns, Guided upgrades, Rollouts waiting
-// for a decision, Held — CI), Inventory and History, plus the buttons. It
-// trusts the X-authentik-username header that Traefik's forward-auth sets
-// and overwrites (the Service is ClusterIP-only behind it); every POST
-// carries a CSRF token bound to that user; every rendered byte is scrubbed.
+// for a decision, Held — CI, untrusted PRs), Inventory and History, plus the
+// buttons.
+//
+// Three separate handlers, served on separate listeners:
+//
+//	UI       pages and actions; every request needs a VERIFIED identity
+//	         (internal/identity) in the operator group; client identity
+//	         headers are stripped after verification
+//	Ops      /healthz and /metrics only — no pages, no actions
+//	Session  the session step/finish API only, authenticated by each
+//	         session's step token; identity headers are never honoured
+//
+// Every POST carries a CSRF token bound to the verified user; status
+// messages travel in a signed, user-bound flash cookie (never in the URL);
+// every rendered byte is scrubbed.
 package web
 
 import (
@@ -12,13 +23,13 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html/template"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -26,6 +37,7 @@ import (
 	"github.com/derio-net/cluster-update-fr/internal/app"
 	"github.com/derio-net/cluster-update-fr/internal/engine"
 	"github.com/derio-net/cluster-update-fr/internal/frankrepo"
+	"github.com/derio-net/cluster-update-fr/internal/identity"
 	"github.com/derio-net/cluster-update-fr/internal/scrub"
 	"github.com/derio-net/cluster-update-fr/internal/session"
 )
@@ -48,10 +60,15 @@ type Backend interface {
 	SessionFinished(ctx context.Context, id, token, outcome, transcript string) error
 }
 
-// Options configures the handler.
+// Options configures the handlers.
 type Options struct {
-	AuthHeader string
-	Secret     []byte // CSRF key (random per process)
+	Auth   identity.Authenticator // nil = refuse everything
+	Secret []byte                 // CSRF / flash key (random per process)
+}
+
+// Handlers are the three listeners' handlers.
+type Handlers struct {
+	UI, Ops, Session http.Handler
 }
 
 //go:embed templates/*.html
@@ -80,31 +97,45 @@ type server struct {
 	opts Options
 }
 
-// New returns the console's HTTP handler.
-func New(b Backend, opts Options) http.Handler {
-	if opts.AuthHeader == "" {
-		opts.AuthHeader = "X-authentik-username"
+// New returns the console's handlers.
+func New(b Backend, opts Options) Handlers {
+	if opts.Auth == nil {
+		opts.Auth = identity.Refuse{}
 	}
 	s := &server{b: b, opts: opts}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+
+	ops := http.NewServeMux()
+	ops.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
+	ops.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = io.WriteString(w, scrub.String(b.Metrics()))
 	})
-	mux.HandleFunc("POST /api/sessions/{id}/step", s.apiStep)
-	mux.HandleFunc("POST /api/sessions/{id}/finish", s.apiFinish)
-	mux.Handle("GET /{$}", s.auth(s.page("needs-action")))
-	mux.Handle("GET /inventory", s.auth(s.page("inventory")))
-	mux.Handle("GET /history", s.auth(s.page("history")))
-	mux.Handle("GET /attach/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+	sess := http.NewServeMux()
+	sess.HandleFunc("POST /api/sessions/{id}/step", s.apiStep)
+	sess.HandleFunc("POST /api/sessions/{id}/finish", s.apiFinish)
+
+	ui := http.NewServeMux()
+	ui.Handle("GET /{$}", s.page("needs-action"))
+	ui.Handle("GET /inventory", s.page("inventory"))
+	ui.Handle("GET /history", s.page("history"))
+	ui.HandleFunc("GET /attach/{id}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, s.b.AttachURL(r.PathValue("id")), http.StatusSeeOther)
-	})))
-	mux.Handle("POST /act/{action}", s.auth(http.HandlerFunc(s.act)))
-	mux.Handle("/act/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	})
+	ui.HandleFunc("POST /act/{action}", s.act)
+	ui.HandleFunc("/act/", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}))
-	return headers(mux)
+	})
+	return Handlers{UI: headers(s.auth(ui)), Ops: headers(ops), Session: headers(stripIdentity(sess))}
+}
+
+func stripIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, h := range identity.IdentityHeaders {
+			r.Header.Del(h)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func headers(next http.Handler) http.Handler {
@@ -123,12 +154,22 @@ var userRe = regexp.MustCompile(`^[A-Za-z0-9._@+-]{1,128}$`)
 
 func (s *server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := r.Header.Get(s.opts.AuthHeader)
-		if !userRe.MatchString(user) {
+		id, err := s.opts.Auth.Authenticate(r)
+		switch {
+		case errors.Is(err, identity.ErrNotConfigured):
+			http.Error(w, "identity verification is not configured", http.StatusServiceUnavailable)
+			return
+		case errors.Is(err, identity.ErrForbidden):
+			http.Error(w, "not in the operator group", http.StatusForbidden)
+			return
+		case err != nil || !userRe.MatchString(id.User):
 			http.Error(w, "not authenticated", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, user)))
+		for _, h := range identity.IdentityHeaders {
+			r.Header.Del(h)
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id.User)))
 	})
 }
 
@@ -154,7 +195,7 @@ type pageData struct {
 func (s *server) page(name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := userOf(r)
-		d := pageData{View: s.b.View(), Page: name, User: user, CSRF: s.csrf(user), Msg: r.URL.Query().Get("msg")}
+		d := pageData{View: s.b.View(), Page: name, User: user, CSRF: s.csrf(user), Msg: s.readFlash(w, r, user)}
 		for _, it := range d.Items {
 			switch {
 			case it.Security:
@@ -179,12 +220,46 @@ func (s *server) page(name string) http.Handler {
 	})
 }
 
-func back(w http.ResponseWriter, r *http.Request, msg string) {
+const flashCookie = "cuf_flash"
+
+func (s *server) flashMAC(user, msg string) string {
+	m := hmac.New(sha256.New, s.opts.Secret)
+	m.Write([]byte("flash:" + user + ":" + msg))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// back redirects to the page the form came from, carrying msg in a short
+// signed cookie bound to the user — never in the URL, so no link can make
+// the console display text of someone else's choosing.
+func (s *server) back(w http.ResponseWriter, r *http.Request, msg string) {
+	msg = scrub.String(msg)
+	if len(msg) > 400 {
+		msg = msg[:400]
+	}
+	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: base64.RawURLEncoding.EncodeToString([]byte(msg)) + "." + s.flashMAC(userOf(r), msg),
+		Path: "/", MaxAge: 60, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	to := "/"
-	if ref := r.FormValue("back"); strings.HasPrefix(ref, "/") && !strings.HasPrefix(ref, "//") {
+	if ref := r.FormValue("back"); ref == "/inventory" || ref == "/history" {
 		to = ref
 	}
-	http.Redirect(w, r, to+"?msg="+url.QueryEscape(scrub.String(msg)), http.StatusSeeOther)
+	http.Redirect(w, r, to, http.StatusSeeOther)
+}
+
+func (s *server) readFlash(w http.ResponseWriter, r *http.Request, user string) string {
+	c, err := r.Cookie(flashCookie)
+	if err != nil {
+		return ""
+	}
+	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	val, mac, ok := strings.Cut(c.Value, ".")
+	if !ok {
+		return ""
+	}
+	b, err := base64.RawURLEncoding.DecodeString(val)
+	if err != nil || !hmac.Equal([]byte(mac), []byte(s.flashMAC(user, string(b)))) {
+		return ""
+	}
+	return string(b)
 }
 
 func (s *server) act(w http.ResponseWriter, r *http.Request) {
@@ -241,13 +316,13 @@ func (s *server) act(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var le *session.LockedError
 		if errors.As(err, &le) {
-			back(w, r, "refused: "+le.Target+" is held by session "+le.Holder)
+			s.back(w, r, "refused: "+le.Target+" is held by session "+le.Holder)
 			return
 		}
-		back(w, r, "failed: "+err.Error())
+		s.back(w, r, "failed: "+err.Error())
 		return
 	}
-	back(w, r, msg)
+	s.back(w, r, msg)
 }
 
 func bearer(r *http.Request) string {

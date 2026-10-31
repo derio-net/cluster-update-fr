@@ -46,6 +46,11 @@
 <h2>⚠️ Held — CI</h2>
 {{range .HeldCI}}{{template "item" (item . $csrf)}}{{else}}<p class="empty">Nothing is held for CI.</p>{{end}}
 
+{{if .Untrusted}}<h2>🚫 Untrusted PRs — ignored</h2>
+<p class="meta">These look like dependency updates but fail the console's trust checks; the console will not act on them.</p>
+<table><tr><th>PR</th><th>Title</th><th>Author</th><th>Why ignored</th></tr>
+{{range .Untrusted}}<tr><td>#{{.Number}}</td><td>{{.Title}}</td><td>{{.Author}}</td><td class="meta">{{.Reason}}</td></tr>{{end}}</table>{{end}}
+
 {{if .Sessions}}<h2>Running sessions</h2>
 <table><tr><th>Upgrade</th><th>Type</th><th>Started</th><th>Step</th><th></th></tr>
 {{range .Sessions}}<tr><td>{{.ID}}</td><td>{{.Type}}</td><td>{{when .StartedAt}}</td><td>{{if .StepRunning}}{{.StepName}} (idle clock paused){{else}}—{{end}}</td>
