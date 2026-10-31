@@ -35,3 +35,6 @@
 ### deviation-p4-no-rolebinding · discovery · deviation P4.T2.S1: the console creates NO per-upgrade RoleBinding (phase 4)
 
 Security review (coordinator, 2026-10-31) restricted the kube write allowlist to create/delete of pods, secrets and rolebindings in the session namespace only, nothing in other namespaces. A RoleBinding granting Longhorn-snapshot or Rollout-status rights must live in the APP namespace, so the console cannot create it. frank must pre-bind those Roles to the per-type ServiceAccounts upgrade-session-stateful / upgrade-session-rollouts (scoped per app namespace), or the session must obtain the grant another way. Frank's plan P5.T1.S1 ('bound per app at launch by the console via a RoleBinding template') and P4.T1.S1's RBAC exception need to change accordingly.
+
+<!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P5.T1 created=2026-10-31T20:34:18+00:00 phase=5 -->
+### no-refactor-because-P5.T1 · discovery · no-refactor-because P5.T1: templates share one item partial and one button helper (phase 5)
