@@ -43,6 +43,24 @@ their Secrets and the per-upgrade RoleBinding.
   re-run endpoint in `/swagger.v1.json`; the console probes the swagger at
   start and falls back to Renovate's rebase checkbox, never an empty commit.
 
+## Phase splits and tiers
+
+The spec lives in derio-net/frank, so this repo has no same-repo spec journal
+to hold `phase-split-*` / `tier-*` decisions (`fr journal add --scope spec`
+refuses an orphaned slug). The decisions are recorded here instead:
+
+- **p1 (skeleton):** R1 inventory + R25 scrubbing — the foundation every later
+  phase reads; carries the CI smoke.
+- **p2 — ask:** the forge engine (R6, R7, R9, R14, R19, R28): countdown, batch,
+  security-first merging and CI diagnosis are one reviewable ask.
+- **p3 — ask:** state machine, verification, history, alarms, report, metrics
+  (R10, R11, R12, R15, R16, R26) — "done means verified" and the quiet alarm.
+- **p4 — ask + tier hard:** disposable sessions (R20–R23, R29). It is the
+  console's only cluster-write path and holds the per-target lock every Start
+  relies on; the paused-idle-clock rule is a judgement the spec leaves open.
+- **p5 — ask:** the pages and the main loop (R13, R18/R19 display), built last
+  on the engine, store and session APIs.
+
 ## Execution
 
 Phases 1–5 are implemented inline by one agent (no subagent dispatch was
