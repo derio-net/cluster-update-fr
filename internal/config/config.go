@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/derio-net/cluster-update-fr/internal/scrub"
 )
 
 // Telegram is the dedicated update chat: the derio.net group's #security topic.
@@ -65,20 +67,26 @@ type Config struct {
 }
 
 // GitHubToken returns the current GitHub App installation token, or "".
-func (c *Config) GitHubToken() string { return secret(c.githubToken, c.githubTokenFile) }
+func (c *Config) GitHubToken() string {
+	return secret("github-token", c.githubToken, c.githubTokenFile)
+}
 
 // GiteaToken returns the Gitea Actions token, or "".
-func (c *Config) GiteaToken() string { return secret(c.giteaToken, c.giteaTokenFile) }
+func (c *Config) GiteaToken() string { return secret("gitea-token", c.giteaToken, c.giteaTokenFile) }
 
-func secret(inline, file string) string {
+// secret reads a credential and registers it with the scrubber, so its
+// literal value is redacted everywhere before any pattern runs (R25).
+func secret(kind, inline, file string) string {
+	v := strings.TrimSpace(inline)
 	if file != "" {
 		b, err := os.ReadFile(file)
 		if err != nil {
 			return ""
 		}
-		return strings.TrimSpace(string(b))
+		v = strings.TrimSpace(string(b))
 	}
-	return strings.TrimSpace(inline)
+	scrub.Register(kind, v)
+	return v
 }
 
 // Load reads the configuration through getenv (os.Getenv in production).
@@ -105,7 +113,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		SessionSecretDir: get("SESSION_SECRET_DIR", ""),
 		RunsFrURL:        strings.TrimRight(get("RUNS_FR_URL", "https://sessions.cluster.derio.net"), "/"),
 		Telegram: Telegram{
-			BotToken: secret(getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN"), getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN_FILE")),
+			BotToken: secret("telegram-bot-token", getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN"), getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN_FILE")),
 			ChatID:   strings.TrimSpace(getenv("FRANK_UPDATER_TELEGRAM_CHAT_ID")),
 			ThreadID: strings.TrimSpace(getenv("FRANK_UPDATER_TELEGRAM_SECURITY_THREAD_ID")),
 		},

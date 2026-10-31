@@ -3,9 +3,21 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/derio-net/cluster-update-fr/internal/scrub"
 )
+
+func TestReadTokensAreRegisteredWithTheScrubber(t *testing.T) {
+	tok := "inline-" + strings.Repeat("Rt5", 6)
+	c, _ := Load(env(map[string]string{"GITEA_TOKEN": tok}))
+	_ = c.GiteaToken()
+	if strings.Contains(scrub.String("error from gitea with "+tok), tok) {
+		t.Fatal("a token the console read must be redacted literally")
+	}
+}
 
 func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }

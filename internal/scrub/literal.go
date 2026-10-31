@@ -54,14 +54,18 @@ func (s *Set) Add(kind, value string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	changed := false
 	for _, c := range candidates {
 		for _, f := range forms(c) {
-			if len(f) >= minLiteral {
+			if len(f) >= minLiteral && s.forms[f] != kind {
 				s.forms[f] = kind
+				changed = true
 			}
 		}
 	}
-	s.sorted = nil
+	if changed { // re-registering a known value (every token read) is free
+		s.sorted = nil
+	}
 }
 
 func forms(v string) []string {
