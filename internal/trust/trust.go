@@ -12,9 +12,13 @@
 //	    verified=true, reason=valid; its GitHub ACCOUNT author is that bot
 //	    (in a batch, either bot) — git author/committer names are free-form
 //	    and prove nothing; its account committer is the bot itself, or
-//	    web-flow ONLY when the signed payload confirms GitHub committed it
-//	    (API-created commits by the App); and the newest commit is the head
-//	    that was verified;
+//	    web-flow ONLY when the signed payload's HEADER (not its message)
+//	    carries exactly one committer line, GitHub's; identity always comes
+//	    from the API account fields, never from payload text. Because
+//	    web-flow also signs web-UI commits by any human, the push actor is
+//	    checked too: the repository activity API's newest push to the head
+//	    ref must be by the bot and must have moved the ref to the verified
+//	    head. The newest commit must be that head;
 //	(d) every changed file lies inside the dependency's own location, and
 //	    nothing under .github/, scripts/, apps/root/, the console's,
 //	    sessions' or Renovate's apps, or the policy files is touched unless
@@ -29,6 +33,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
@@ -52,6 +57,7 @@ type API interface {
 	PR(ctx context.Context, n int) (forge.PR, error)
 	PRCommits(ctx context.Context, n int) ([]forge.Commit, error)
 	PRFiles(ctx context.Context, n int) ([]string, error)
+	LastPush(ctx context.Context, branch string) (forge.Push, error)
 }
 
 // Scope is where an item's change may land.
@@ -169,6 +175,13 @@ func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) er
 	if last := commits[len(commits)-1].SHA; last != pr.HeadSHA {
 		return fmt.Errorf("head moved: verified commits end at %.8s, PR head is %.8s", last, pr.HeadSHA)
 	}
+	push, err := api.LastPush(ctx, pr.HeadRef)
+	if err != nil {
+		return fmt.Errorf("push actor unreadable: %w", err)
+	}
+	if push.After != pr.HeadSHA || push.Actor != author {
+		return fmt.Errorf("the head was pushed by account %q (to %.8s), not by the bot", push.Actor, push.After)
+	}
 	// (d)
 	if !scope.Known {
 		return errors.New("the dependency's location in the repo is unknown, so its changed files cannot be checked")
@@ -191,9 +204,23 @@ func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) er
 	return nil
 }
 
-// gitHubCommitter is the committer line GitHub writes into commits it
-// creates and signs on an App's behalf (web-flow).
-const gitHubCommitter = "\ncommitter GitHub <noreply@github.com> "
+var gitHubCommitter = regexp.MustCompile(`^committer GitHub <noreply@github\.com> \d+ [+-]\d{4}$`)
+
+// signedByGitHub parses ONLY the header block of the signed commit object
+// (the lines before the first blank line, so the message cannot count) and
+// requires exactly one committer header, GitHub's own.
+func signedByGitHub(payload string) bool {
+	head, _, _ := strings.Cut(strings.ReplaceAll(payload, "\r\n", "\n"), "\n\n")
+	committers := 0
+	ok := false
+	for _, l := range strings.Split(head, "\n") {
+		if strings.HasPrefix(l, "committer ") {
+			committers++
+			ok = gitHubCommitter.MatchString(l)
+		}
+	}
+	return committers == 1 && ok
+}
 
 func commitTrusted(cm forge.Commit, authors, webCommitters map[string]bool) error {
 	switch {
@@ -203,7 +230,7 @@ func commitTrusted(cm forge.Commit, authors, webCommitters map[string]bool) erro
 		return fmt.Errorf("commit %.8s is authored by account %q, not the bot", cm.SHA, cm.Author)
 	case authors[cm.Committer]:
 		return nil // signed with the bot's own key and committed by it
-	case webCommitters[cm.Committer] && strings.Contains(cm.Payload, gitHubCommitter):
+	case webCommitters[cm.Committer] && signedByGitHub(cm.Payload):
 		return nil // created through the API and signed by GitHub (web-flow)
 	}
 	return fmt.Errorf("commit %.8s was committed by account %q, not the bot or GitHub", cm.SHA, cm.Committer)

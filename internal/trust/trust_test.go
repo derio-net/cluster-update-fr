@@ -18,7 +18,21 @@ type fakeAPI struct {
 	prs     map[int]forge.PR
 	commits map[int][]forge.Commit
 	files   map[int][]string
+	pushes  map[string]forge.Push
 	merged  []string
+}
+
+func (f *fakeAPI) LastPush(_ context.Context, branch string) (forge.Push, error) {
+	if p, ok := f.pushes[branch]; ok {
+		return p, nil
+	}
+	for n, pr := range f.prs {
+		if pr.HeadRef == branch {
+			c := f.commits[n]
+			return forge.Push{After: pr.HeadSHA, Actor: c[len(c)-1].Author}, nil
+		}
+	}
+	return forge.Push{}, forge.ErrNotFound
 }
 
 func (f *fakeAPI) PR(_ context.Context, n int) (forge.PR, error) { return f.prs[n], nil }
@@ -95,6 +109,16 @@ func TestEveryConditionRefuses(t *testing.T) {
 			x.Payload = "tree a\ncommitter Mallory <m@example.com> 1 +0000\n"
 			*c = []forge.Commit{x}
 		}, nil, "committed"},
+		{"commit message containing GitHub's committer line", func(_ *forge.PR, c *[]forge.Commit, _ *[]string) {
+			x := signed("head", bot, "web-flow")
+			x.Payload = "tree a\nauthor x <x@y> 1 +0000\ncommitter Mallory <m@example.com> 1 +0000\n\ncommitter GitHub <noreply@github.com> 1 +0000\n"
+			*c = []forge.Commit{x}
+		}, nil, "committed"},
+		{"header with two committer lines", func(_ *forge.PR, c *[]forge.Commit, _ *[]string) {
+			x := signed("head", bot, "web-flow")
+			x.Payload = "tree a\ncommitter GitHub <noreply@github.com> 1 +0000\ncommitter Mallory <m@example.com> 1 +0000\n\nmsg"
+			*c = []forge.Commit{x}
+		}, nil, "committed"},
 		{"mixed commits: one unverified among signed", func(_ *forge.PR, c *[]forge.Commit, _ *[]string) {
 			*c = []forge.Commit{signed("a", bot, "web-flow"), {SHA: "b", Author: bot, Committer: bot, Reason: "unverified_email"}, signed("head", bot, "web-flow")}
 		}, nil, "signature"},
@@ -126,6 +150,35 @@ func TestEveryConditionRefuses(t *testing.T) {
 				t.Fatalf("err = %v, want it to mention %q", err, c.wantSub)
 			}
 		})
+	}
+}
+
+func TestPushActorMustBeTheBot(t *testing.T) {
+	ctx := context.Background()
+	pr := goodPR(7)
+	// A human edits the branch in the web UI: web-flow signs it, but the
+	// commit's account author is theirs AND the push actor is theirs.
+	human := api(7, pr, []forge.Commit{signed("head", "mallory", "web-flow")}, []string{"apps/homepage/x.yaml"})
+	if err := cfg().Check(ctx, human, pr, ScopeFor(homepage())); err == nil {
+		t.Fatal("web-flow commit by a human account was trusted")
+	}
+	// Bot-looking commits, but a human pushed them.
+	pushed := api(7, pr, botCommit, []string{"apps/homepage/x.yaml"})
+	pushed.pushes = map[string]forge.Push{pr.HeadRef: {After: "head", Actor: "mallory"}}
+	if err := cfg().Check(ctx, pushed, pr, ScopeFor(homepage())); err == nil || !strings.Contains(err.Error(), "pushed by") {
+		t.Fatalf("push by a human: %v", err)
+	}
+	// The newest push moved the ref elsewhere.
+	stale := api(7, pr, botCommit, []string{"apps/homepage/x.yaml"})
+	stale.pushes = map[string]forge.Push{pr.HeadRef: {After: "other", Actor: bot}}
+	if err := cfg().Check(ctx, stale, pr, ScopeFor(homepage())); err == nil {
+		t.Fatal("push record for another sha was accepted")
+	}
+	// The correct bot commit, pushed by the bot.
+	ok := api(7, pr, botCommit, []string{"apps/homepage/x.yaml"})
+	ok.pushes = map[string]forge.Push{pr.HeadRef: {After: "head", Actor: bot}}
+	if err := cfg().Check(ctx, ok, pr, ScopeFor(homepage())); err != nil {
+		t.Fatalf("correct bot commit: %v", err)
 	}
 }
 

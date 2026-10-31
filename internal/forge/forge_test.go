@@ -310,3 +310,16 @@ func TestPRProvenance(t *testing.T) {
 		t.Fatalf("files = %v %v", fs, err)
 	}
 }
+
+func TestLastPush(t *testing.T) {
+	srv, calls := fake(t, map[string]string{
+		"GET /repos/derio-net/frank/activity": `[{"after":"abc","activity_type":"push","actor":{"login":"renovate-frank[bot]"}}]`,
+	})
+	p, err := gh(srv, "t").LastPush(context.Background(), "renovate/x")
+	if err != nil || p.After != "abc" || p.Actor != "renovate-frank[bot]" {
+		t.Fatalf("LastPush = %+v %v", p, err)
+	}
+	if !strings.Contains((*calls)[0].Query, "ref=refs%2Fheads%2Frenovate%2Fx") {
+		t.Errorf("query = %q", (*calls)[0].Query)
+	}
+}

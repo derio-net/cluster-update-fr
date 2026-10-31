@@ -66,6 +66,21 @@ func (g *fakeGitHub) PRCommits(_ context.Context, n int) ([]forge.Commit, error)
 	}
 	return nil, nil
 }
+func (g *fakeGitHub) LastPush(_ context.Context, branch string) (forge.Push, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, p := range g.prs {
+		if p.HeadRef == branch {
+			actor := renovateBot
+			if c, ok := g.commits[p.Number]; ok && len(c) > 0 {
+				actor = c[len(c)-1].Author
+			}
+			return forge.Push{After: p.HeadSHA, Actor: actor}, nil
+		}
+	}
+	return forge.Push{}, forge.ErrNotFound
+}
+
 func (g *fakeGitHub) PRFiles(_ context.Context, n int) ([]string, error) {
 	if f, ok := g.files[n]; ok {
 		return f, nil
@@ -334,13 +349,13 @@ func TestUntrustedPRsAreNeverItems(t *testing.T) {
 	base := forge.PR{Title: "Update homepage", HeadRef: "renovate/homepage", Author: renovateBot, HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank",
 		CreatedAt: t0.Add(-48 * time.Hour), UpdatedAt: t0.Add(-48 * time.Hour), Body: body}
 	fork := base
-	fork.Number, fork.HeadSHA, fork.HeadRepo = 11, "f11", "attacker/frank"
+	fork.Number, fork.HeadSHA, fork.HeadRepo, fork.HeadRef = 11, "f11", "attacker/frank", "renovate/homepage-11"
 	human := base
-	human.Number, human.HeadSHA, human.Author = 12, "h12", "mallory"
+	human.Number, human.HeadSHA, human.Author, human.HeadRef = 12, "h12", "mallory", "renovate/homepage-12"
 	pushed := base
-	pushed.Number, pushed.HeadSHA = 13, "h13"
+	pushed.Number, pushed.HeadSHA, pushed.HeadRef = 13, "h13", "renovate/homepage-13"
 	workflow := base
-	workflow.Number, workflow.HeadSHA = 14, "h14"
+	workflow.Number, workflow.HeadSHA, workflow.HeadRef = 14, "h14", "renovate/homepage-14"
 	gh.prs = []forge.PR{fork, human, pushed, workflow}
 	gh.commits = map[int][]forge.Commit{13: {signedCommit("b", renovateBot), signedCommit("h13", "mallory")}}
 	gh.files = map[int][]string{14: {"apps/homepage/x.yaml", ".github/workflows/ci.yml"}}
