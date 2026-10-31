@@ -1,8 +1,10 @@
 package scrub
 
 import (
+	"bytes"
 	"encoding/base64"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -16,19 +18,36 @@ const minLiteral = 8
 // credential the console itself holds or injects is registered here, and its
 // literal occurrences are replaced before the pattern pass runs, so a known
 // secret is redacted whatever shape it appears in (inside a sentence, split
-// across a YAML block, base64- or URL-encoded).
+// across a YAML block, base64- or URL-encoded, or inside a larger base64
+// blob such as a base64-encoded kubeconfig).
+//
+// Matching is done on the ORIGINAL text against the forms of this set and
+// every ancestor at once; overlapping and adjacent matches are merged and each
+// merged span is redacted once, so neither registration order nor set level
+// can make one replacement break another and leak a remainder.
 //
 // The zero value is not usable; call NewSet.
 type Set struct {
 	parent *Set
 	mu     sync.RWMutex
-	forms  map[string]string // form -> kind
-	sorted []entry           // forms, longest first (rebuilt lazily)
+	forms  map[string]form
+	cached []entry // this set's forms, rebuilt lazily
+}
+
+type form struct {
+	kind string
+	raw  bool // a plain value or line (searched for inside decoded base64)
+}
+
+type entry struct {
+	form string
+	kind string
+	raw  bool
 }
 
 // NewSet returns an empty set whose String also applies parent's literals
 // (nil for none). A session set has the process-wide set as its parent.
-func NewSet(parent *Set) *Set { return &Set{parent: parent, forms: map[string]string{}} }
+func NewSet(parent *Set) *Set { return &Set{parent: parent, forms: map[string]form{}} }
 
 // global holds the console's own credentials (GitHub App token, Gitea token,
 // Telegram bot token, …); package-level String applies it.
@@ -37,10 +56,10 @@ var global = NewSet(nil)
 // Register adds a credential to the process-wide set.
 func Register(kind, value string) { global.Add(kind, value) }
 
-// Add registers value and its derived forms: the trimmed value, its standard,
-// URL-safe and unpadded base64 encodings, its URL query/path escapes, and
-// every line of a multi-line value (PEM blocks, talosconfig keys) together
-// with each line's base64 form.
+// Add registers value and its derived forms: the trimmed value, every line of
+// a multi-line value (PEM blocks, talosconfig keys), and for each of those its
+// URL escapes and its base64 encodings (standard and URL alphabets) at all
+// three byte alignments, so the secret is found inside a larger base64 blob.
 func (s *Set) Add(kind, value string) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -55,75 +74,183 @@ func (s *Set) Add(kind, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	changed := false
+	put := func(f string, raw bool) {
+		if len(f) < minLiteral {
+			return
+		}
+		if old, ok := s.forms[f]; ok && old.kind == kind && (old.raw || !raw) {
+			return
+		}
+		s.forms[f] = form{kind: kind, raw: raw}
+		changed = true
+	}
 	for _, c := range candidates {
-		for _, f := range forms(c) {
-			if len(f) >= minLiteral && s.forms[f] != kind {
-				s.forms[f] = kind
-				changed = true
-			}
+		put(c, true)
+		for _, f := range derivedForms(c) {
+			put(f, false)
 		}
 	}
 	if changed { // re-registering a known value (every token read) is free
-		s.sorted = nil
+		s.cached = nil
 	}
 }
 
-func forms(v string) []string {
+// derivedForms returns the encoded forms of v that are stable whatever bytes
+// surround it.
+func derivedForms(v string) []string {
+	out := []string{url.QueryEscape(v), url.PathEscape(v)}
 	b := []byte(v)
-	out := []string{
-		v,
-		base64.StdEncoding.EncodeToString(b),
-		base64.RawStdEncoding.EncodeToString(b),
-		base64.URLEncoding.EncodeToString(b),
-		base64.RawURLEncoding.EncodeToString(b),
-		url.QueryEscape(v),
-		url.PathEscape(v),
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding} {
+		// Offset 0 with padding: the common "the whole value was encoded".
+		out = append(out, enc.EncodeToString(b))
+		for k := 0; k < 3; k++ {
+			out = append(out, alignedBase64(enc.WithPadding(base64.NoPadding), b, k))
+		}
 	}
 	return out
 }
 
-type entry struct{ form, kind string }
+// alignedBase64 encodes b as it appears when preceded by k bytes inside a
+// larger blob, keeping only the characters determined by b alone: base64
+// character i covers bits [6i, 6i+6), so it depends only on b when that range
+// lies within [8k, 8(k+len(b))).
+func alignedBase64(enc *base64.Encoding, b []byte, k int) string {
+	padded := append(make([]byte, k), b...)
+	s := enc.EncodeToString(padded)
+	start := (8*k + 5) / 6
+	end := 8 * (k + len(b)) / 6
+	if end > len(s) {
+		end = len(s)
+	}
+	if start >= end {
+		return ""
+	}
+	return s[start:end]
+}
 
-// ordered returns the registered forms, longest first, so a whole value is
-// replaced before any of its lines. The slice is immutable once built.
-func (s *Set) ordered() []entry {
+func (s *Set) own() []entry {
 	s.mu.RLock()
-	cached := s.sorted
+	c := s.cached
 	s.mu.RUnlock()
-	if cached != nil {
-		return cached
+	if c != nil {
+		return c
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sorted != nil {
-		return s.sorted
+	if s.cached != nil {
+		return s.cached
 	}
 	out := make([]entry, 0, len(s.forms))
-	for f, k := range s.forms {
-		out = append(out, entry{f, k})
+	for f, m := range s.forms {
+		out = append(out, entry{f, m.kind, m.raw})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if len(out[i].form) != len(out[j].form) {
-			return len(out[i].form) > len(out[j].form)
-		}
-		return out[i].form < out[j].form
-	})
-	s.sorted = out
+	sort.Slice(out, func(i, j int) bool { return out[i].form < out[j].form })
+	s.cached = out
 	return out
 }
 
-// literals replaces every registered form (this set's, then its parent's).
+// all returns the forms of s and every ancestor.
+func (s *Set) all() []entry {
+	var out []entry
+	for p := s; p != nil; p = p.parent {
+		out = append(out, p.own()...)
+	}
+	return out
+}
+
+type span struct {
+	start, end int
+	kind       string
+	weight     int // length of the form that produced it
+}
+
+var base64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}={0,2}`)
+
+// literals redacts every registered form found in text.
 func (s *Set) literals(text string, seen func(string)) string {
 	if s == nil {
 		return text
 	}
-	for _, e := range s.ordered() {
-		if strings.Contains(text, e.form) {
-			seen(e.kind)
-			text = strings.ReplaceAll(text, e.form, marker(e.kind))
+	entries := s.all()
+	if len(entries) == 0 {
+		return text
+	}
+	var spans []span
+	for _, e := range entries {
+		for idx := 0; idx < len(text); {
+			i := strings.Index(text[idx:], e.form)
+			if i < 0 {
+				break
+			}
+			st := idx + i
+			spans = append(spans, span{st, st + len(e.form), e.kind, len(e.form)})
+			idx = st + 1 // overlapping occurrences too
 		}
 	}
-	return s.parent.literals(text, seen)
+	// Decode base64-looking runs and look for raw values inside: catches an
+	// encoding the aligned forms cannot (e.g. a value split across lines
+	// before encoding). The whole run is redacted.
+	for _, m := range base64Run.FindAllStringIndex(text, -1) {
+		decoded := decodeLoose(text[m[0]:m[1]])
+		if decoded == nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.raw && bytes.Contains(decoded, []byte(e.form)) {
+				spans = append(spans, span{m[0], m[1], e.kind, len(e.form)})
+				break
+			}
+		}
+	}
+	if len(spans) == 0 {
+		return text
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start != spans[j].start {
+			return spans[i].start < spans[j].start
+		}
+		return spans[i].end > spans[j].end
+	})
+	merged := []span{spans[0]}
+	for _, sp := range spans[1:] {
+		cur := &merged[len(merged)-1]
+		if sp.start <= cur.end { // overlapping or adjacent
+			if sp.end > cur.end {
+				cur.end = sp.end
+			}
+			if sp.weight > cur.weight {
+				cur.kind, cur.weight = sp.kind, sp.weight
+			}
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	var b strings.Builder
+	last := 0
+	for _, sp := range merged {
+		seen(sp.kind)
+		b.WriteString(text[last:sp.start])
+		b.WriteString(marker(sp.kind))
+		last = sp.end
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+func decodeLoose(run string) []byte {
+	run = strings.TrimRight(run, "=")
+	for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(run); err == nil {
+			return b
+		}
+		// A run cut mid-quantum: drop the dangling characters.
+		if cut := len(run) - len(run)%4; cut > 0 && cut != len(run) {
+			if b, err := enc.DecodeString(run[:cut]); err == nil {
+				return b
+			}
+		}
+	}
+	return nil
 }
 
 // String redacts the set's literals first, then every pattern.

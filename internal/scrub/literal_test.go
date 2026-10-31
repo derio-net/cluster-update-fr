@@ -98,7 +98,7 @@ func TestLiteralSetRedactsShapesNoPatternMatches(t *testing.T) {
 			if !strings.Contains(out, "«redacted:"+c.Kind+"»") {
 				t.Errorf("String(%q) = %q, want «redacted:%s»", in, out, c.Kind)
 			}
-			for _, form := range forms(secret) {
+			for _, form := range append(derivedForms(secret), secret) {
 				if len(form) >= minLiteral && strings.Contains(out, form) {
 					t.Errorf("form %q survived: %q", form, out)
 				}
