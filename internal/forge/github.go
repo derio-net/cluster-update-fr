@@ -336,3 +336,23 @@ func (g *GitHub) Contains(ctx context.Context, ancestor, descendant string) (boo
 func (g *GitHub) DeleteBranch(ctx context.Context, branch string) error {
 	return g.c().do(ctx, http.MethodDelete, g.repo("/git/refs/heads/"+branch), nil, nil, true)
 }
+
+// Releases lists the newest release tags of a public repository
+// (siderolabs/talos, kubernetes/kubernetes, siderolabs/omni).
+func (g *GitHub) Releases(ctx context.Context, ownerRepo string) ([]string, error) {
+	var raw []struct {
+		Tag        string `json:"tag_name"`
+		Draft      bool   `json:"draft"`
+		Prerelease bool   `json:"prerelease"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, "/repos/"+ownerRepo+"/releases?per_page=100", nil, &raw, false); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range raw {
+		if !r.Draft && !r.Prerelease {
+			out = append(out, r.Tag)
+		}
+	}
+	return out, nil
+}

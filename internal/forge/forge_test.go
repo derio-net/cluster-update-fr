@@ -281,3 +281,11 @@ func TestContainsAndDeleteBranch(t *testing.T) {
 		t.Error("delete")
 	}
 }
+
+func TestReleases(t *testing.T) {
+	srv, _ := fake(t, map[string]string{"GET /repos/siderolabs/talos/releases": `[{"tag_name":"v1.14.5"},{"tag_name":"v1.15.0-beta.1","prerelease":true},{"tag_name":"v9","draft":true}]`})
+	tags, err := gh(srv, "").Releases(context.Background(), "siderolabs/talos")
+	if err != nil || len(tags) != 1 || tags[0] != "v1.14.5" {
+		t.Fatalf("Releases = %v %v", tags, err)
+	}
+}
