@@ -1,0 +1,4 @@
+# DECLARED versions of the Hop cluster. Steps use talosctl upgrade / upgrade-k8s.
+talos: "1.12.5"
+kubernetes: "1.34.1"
+managed_by: talosctl

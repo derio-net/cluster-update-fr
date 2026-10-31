@@ -1,0 +1,5 @@
+# DECLARED versions of the Frank cluster (git leads the cluster).
+# Versions-only — NOT an Omni cluster template.
+talos: "1.12.6"
+kubernetes: "1.35.3"
+managed_by: omni

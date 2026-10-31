@@ -1,0 +1,31 @@
+# Fixture update policy.
+version: 1
+merge_window: 24h
+minimum_release_age: 72h
+defaults:
+  patch: auto-merge
+  minor: batch-approve
+  major: session
+  digest: batch-approve
+rules:
+  - match: {app: paperclip-db}
+    path: session
+    reason: stateful — snapshot before merge
+  - match: {app: litellm}
+    path: session
+    reason: Argo Rollouts canary
+  - match: {dep: omni}
+    path: operator-runbook
+    reason: run from the laptop
+  - match: {dep: talos}
+    path: session
+    reason: OS step
+  - match: {dep: kubernetes}
+    path: session
+    reason: OS step
+  - match: {image: "ghcr.io/derio-net/*"}
+    path: batch-approve
+    reason: own images
+  - match: {chart: cilium}
+    path: session
+    reason: CNI minors
