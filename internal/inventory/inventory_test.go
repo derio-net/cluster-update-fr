@@ -153,7 +153,7 @@ func TestGroupingIsStable(t *testing.T) {
 	if groups[0].Services[0].Name != "homepage" {
 		t.Errorf("services not sorted: %+v", groups[0].Services)
 	}
-	if Key("frank", "litellm", "image", "x") != "frank/litellm/image/x" {
+	if ID("frank", "litellm", "image", "x") != "frank/litellm/image/x" {
 		t.Error("Key")
 	}
 }

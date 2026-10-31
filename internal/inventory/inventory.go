@@ -26,7 +26,7 @@ const (
 
 // Dependency is one inventory row.
 type Dependency struct {
-	Key               string
+	ID                string
 	Cluster, Service  string
 	Kind, Name        string
 	Declared, Running string
@@ -42,8 +42,8 @@ type Dependency struct {
 	VulnCounts        map[string]int
 }
 
-// Key identifies a dependency across inventory rebuilds (shared with alarms).
-func Key(cluster, service, kind, name string) string {
+// ID identifies a dependency across inventory rebuilds (shared with alarms).
+func ID(cluster, service, kind, name string) string {
 	return cluster + "/" + service + "/" + kind + "/" + name
 }
 
@@ -114,7 +114,7 @@ type builder struct {
 }
 
 func (b *builder) add(d Dependency) {
-	d.Key = Key(d.Cluster, d.Service, d.Kind, d.Name)
+	d.setID()
 	if d.Latest == "" {
 		d.Latest = b.in.Latest[d.Name]
 	}
@@ -360,12 +360,15 @@ func (inv *Inventory) Grouped() []ClusterGroup {
 	return out
 }
 
-// Find returns the dependency with key, or nil.
-func (inv *Inventory) Find(key string) *Dependency {
+// Find returns the dependency with id, or nil.
+func (inv *Inventory) Find(id string) *Dependency {
 	for i := range inv.Deps {
-		if inv.Deps[i].Key == key {
+		if inv.Deps[i].ID == id {
 			return &inv.Deps[i]
 		}
 	}
 	return nil
 }
+
+// setID fills ID from the identifying fields.
+func (d *Dependency) setID() { d.ID = ID(d.Cluster, d.Service, d.Kind, d.Name) }
