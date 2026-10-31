@@ -18,3 +18,6 @@
 
 <!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P3.T1 created=2026-10-31T19:57:00+00:00 phase=3 -->
 ### no-refactor-because-P3.T1 · discovery · no-refactor-because P3.T1: store transition logic is one function used by Transition, Record and Reconcile (phase 3)
+
+<!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P3.T2 created=2026-10-31T19:57:03+00:00 phase=3 -->
+### no-refactor-because-P3.T2 · discovery · no-refactor-because P3.T2: verify is pure functions over inputs; no duplication between workload and OS paths beyond the smoke summary helper (phase 3)
