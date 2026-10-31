@@ -48,6 +48,11 @@ type fakeGitHub struct {
 
 const renovateBot = "renovate-frank[bot]"
 
+func signedCommit(sha, author string) forge.Commit {
+	return forge.Commit{SHA: sha, Author: author, Committer: "web-flow", Verified: true, Reason: "valid",
+		Payload: "tree a\nauthor x <x@y> 1 +0000\ncommitter GitHub <noreply@github.com> 1 +0000\n\nmsg"}
+}
+
 func (g *fakeGitHub) PRCommits(_ context.Context, n int) ([]forge.Commit, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -56,7 +61,7 @@ func (g *fakeGitHub) PRCommits(_ context.Context, n int) ([]forge.Commit, error)
 	}
 	for _, p := range g.prs {
 		if p.Number == n {
-			return []forge.Commit{{SHA: p.HeadSHA, Author: renovateBot, Committer: "web-flow"}}, nil
+			return []forge.Commit{signedCommit(p.HeadSHA, renovateBot)}, nil
 		}
 	}
 	return nil, nil
@@ -337,7 +342,7 @@ func TestUntrustedPRsAreNeverItems(t *testing.T) {
 	workflow := base
 	workflow.Number, workflow.HeadSHA = 14, "h14"
 	gh.prs = []forge.PR{fork, human, pushed, workflow}
-	gh.commits = map[int][]forge.Commit{13: {{SHA: "b", Author: renovateBot, Committer: "web-flow"}, {SHA: "h13", Author: "mallory", Committer: "mallory"}}}
+	gh.commits = map[int][]forge.Commit{13: {signedCommit("b", renovateBot), signedCommit("h13", "mallory")}}
 	gh.files = map[int][]string{14: {"apps/homepage/x.yaml", ".github/workflows/ci.yml"}}
 	v := a.Cycle(context.Background())
 	if len(v.Items) != 0 {

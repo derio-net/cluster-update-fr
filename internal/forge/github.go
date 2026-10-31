@@ -379,8 +379,11 @@ func (g *GitHub) Releases(ctx context.Context, ownerRepo string) ([]string, erro
 // Commit is one commit of a pull request with its GitHub identities.
 type Commit struct {
 	SHA       string
-	Author    string // GitHub login of the author ("" if not linked)
-	Committer string // GitHub login of the committer ("" if not linked)
+	Author    string // GitHub ACCOUNT login of the author ("" if not linked)
+	Committer string // GitHub ACCOUNT login of the committer ("" if not linked)
+	Verified  bool   // commit.verification.verified
+	Reason    string // commit.verification.reason ("valid" when verified)
+	Payload   string // commit.verification.payload: the signed commit object
 }
 
 // PRCommits lists a pull request's commits (GitHub caps the list at 250).
@@ -393,13 +396,21 @@ func (g *GitHub) PRCommits(ctx context.Context, n int) ([]Commit, error) {
 		Committer *struct {
 			Login string `json:"login"`
 		} `json:"committer"`
+		Commit struct {
+			Verification struct {
+				Verified bool   `json:"verified"`
+				Reason   string `json:"reason"`
+				Payload  string `json:"payload"`
+			} `json:"verification"`
+		} `json:"commit"`
 	}
 	if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/pulls/%d/commits?per_page=100", n)), nil, &raw, false); err != nil {
 		return nil, err
 	}
 	out := make([]Commit, 0, len(raw))
 	for _, c := range raw {
-		x := Commit{SHA: c.SHA}
+		v := c.Commit.Verification
+		x := Commit{SHA: c.SHA, Verified: v.Verified, Reason: v.Reason, Payload: v.Payload}
 		if c.Author != nil {
 			x.Author = c.Author.Login
 		}
