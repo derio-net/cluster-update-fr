@@ -33,7 +33,12 @@ type pattern struct {
 	notBefore string
 	// classify refines the kind from the secret (optional).
 	classify func(secret string) string
+	// trimRight strips these trailing bytes from the secret span (a
+	// separator the value class could not exclude without leaking).
+	trimRight string
 }
+
+const secretKeys = `(?:token|access_token|refresh_token|client-key-data|client-certificate-data|key|crt|ca|password|passwd|pass|secret|client_secret|private_key|api_key|apikey)`
 
 const (
 	alnum      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -51,11 +56,18 @@ var patterns = []pattern{
 	// Exactly 35 secret characters: a longer run is redacted at its first 35,
 	// which over-redacts harmlessly instead of leaking an adjacent token.
 	{kind: "telegram-bot-token", re: regexp.MustCompile(`([0-9]{6,12}:[A-Za-z0-9_-]{35})`), notBefore: "0123456789"},
-	{kind: "bearer", re: regexp.MustCompile(`(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{16,})`)},
+	{kind: "bearer", re: regexp.MustCompile(`(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{8,})`)},
 	{kind: "gitea-token", re: regexp.MustCompile(`(?i)\btoken\s+([0-9a-f]{40})`)},
-	// The value class also stops at a backtick, so Markdown prose such as
-	// "`token:`/`client-key-data:`" is not read as a key/value pair.
-	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b(?:token|access_token|refresh_token|client-key-data|client-certificate-data|key|crt|ca|password|passwd|secret|private_key|api_key|apikey)["']?\s*[:=]\s*["']?([^\s"'` + "`" + `,}«#]{16,})`)},
+	// key/value secrets (YAML, JSON, env). Quoted values run to the matching
+	// quote, so '#', ',' and '}' inside a secret are redacted with it.
+	// Unquoted values run to whitespace (so " #" starts a comment but "a#b"
+	// does not) or a quote/backtick (Markdown prose such as
+	// "`token:`/`client-key-data:`" is not a pair); a trailing ',' or '}'
+	// is trimmed in code. Floors are low on purpose: over-redaction is the
+	// safe failure here.
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?\s*[:=]\s*"([^"\n]{8,})"`)},
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?\s*[:=]\s*'([^'\n]{8,})'`)},
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?[ \t]*[:=][ \t]*([^\s"'` + "`" + `]{8,})`), trimRight: ",}"},
 }
 
 // classifyEyJ tells an Omni service-account key (base64 JSON carrying a PGP
@@ -75,6 +87,12 @@ func classifyEyJ(secret string) string {
 
 func marker(kind string) string { return "«redacted:" + kind + "»" }
 
+// isMarker reports whether s is exactly one redaction marker, so a redacted
+// value is never redacted again (keeps String idempotent and Find clean).
+func isMarker(s string) bool {
+	return strings.HasPrefix(s, "«redacted:") && strings.HasSuffix(s, "»") && strings.Count(s, "«") == 1
+}
+
 type hit struct {
 	start, end int
 	kind       string
@@ -92,6 +110,15 @@ func (p pattern) matches(text string) []hit {
 			break
 		}
 		start, end := pos+m[2], pos+m[3]
+		if p.trimRight != "" {
+			for end > start && strings.IndexByte(p.trimRight, text[end-1]) >= 0 {
+				end--
+			}
+		}
+		if isMarker(text[start:end]) {
+			pos = pos + m[1]
+			continue
+		}
 		if p.notBefore != "" && start > 0 && strings.IndexByte(p.notBefore, text[start-1]) >= 0 {
 			pos = pos + m[0] + 1
 			continue

@@ -74,6 +74,7 @@ type fixtureFile struct {
 	Cases []struct {
 		Name  string    `json:"name"`
 		Kinds []string  `json:"kinds"`
+		Leaks []string  `json:"leaks"`
 		In    []segment `json:"in"`
 	} `json:"cases"`
 	Benign [][]segment `json:"benign"`
@@ -105,6 +106,7 @@ func TestStringRedactsEveryCase(t *testing.T) {
 					t.Errorf("String(%q) = %q, missing «redacted:%s»", in, out, k)
 				}
 			}
+			secrets = append(secrets, c.Leaks...)
 			for _, s := range secrets {
 				if strings.Contains(out, s) {
 					t.Errorf("secret material %q survived: %q", s, out)
