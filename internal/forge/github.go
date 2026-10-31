@@ -1,0 +1,321 @@
+package forge
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
+	"time"
+)
+
+// GitHub is the derio-net/frank repository on GitHub.
+type GitHub struct {
+	API   string
+	Repo  string
+	Token func() string
+	HTTP  *http.Client
+}
+
+func (g *GitHub) c() client {
+	return client{base: g.API, auth: g.Token, http: g.HTTP, scheme: "Bearer"}
+}
+
+func (g *GitHub) repo(path string) string { return "/repos/" + g.Repo + path }
+
+// PR is a pull request.
+type PR struct {
+	Number         int
+	NodeID         string
+	Title, Body    string
+	State          string
+	Draft          bool
+	HeadSHA        string
+	HeadRef        string
+	Author         string
+	Labels         []string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	Mergeable      *bool
+	MergeableState string
+	Merged         bool
+	MergeCommitSHA string
+	URL            string
+}
+
+// HasLabel reports whether the PR carries label.
+func (p PR) HasLabel(label string) bool {
+	for _, l := range p.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
+type ghPR struct {
+	Number    int       `json:"number"`
+	NodeID    string    `json:"node_id"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	State     string    `json:"state"`
+	Draft     bool      `json:"draft"`
+	HTMLURL   string    `json:"html_url"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Head      struct {
+		SHA string `json:"sha"`
+		Ref string `json:"ref"`
+	} `json:"head"`
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	Mergeable      *bool  `json:"mergeable"`
+	MergeableState string `json:"mergeable_state"`
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
+}
+
+func (p ghPR) pr() PR {
+	out := PR{Number: p.Number, NodeID: p.NodeID, Title: p.Title, Body: p.Body, State: p.State, Draft: p.Draft,
+		HeadSHA: p.Head.SHA, HeadRef: p.Head.Ref, Author: p.User.Login, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
+		Mergeable: p.Mergeable, MergeableState: p.MergeableState, Merged: p.Merged, MergeCommitSHA: p.MergeCommitSHA, URL: p.HTMLURL}
+	for _, l := range p.Labels {
+		out.Labels = append(out.Labels, l.Name)
+	}
+	return out
+}
+
+// OpenPRs lists open pull requests (first 100).
+func (g *GitHub) OpenPRs(ctx context.Context) ([]PR, error) {
+	var raw []ghPR
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/pulls?state=open&per_page=100"), nil, &raw, false); err != nil {
+		return nil, err
+	}
+	out := make([]PR, 0, len(raw))
+	for _, p := range raw {
+		out = append(out, p.pr())
+	}
+	return out, nil
+}
+
+// PR fetches one pull request, including mergeability.
+func (g *GitHub) PR(ctx context.Context, n int) (PR, error) {
+	var raw ghPR
+	if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/pulls/%d", n)), nil, &raw, false); err != nil {
+		return PR{}, err
+	}
+	return raw.pr(), nil
+}
+
+// Merge squash-merges PR n only if its head is still sha (a PR that moved is
+// never merged blind) and returns the merge commit sha.
+func (g *GitHub) Merge(ctx context.Context, n int, sha string) (string, error) {
+	var out struct {
+		SHA string `json:"sha"`
+	}
+	err := g.c().do(ctx, http.MethodPut, g.repo(fmt.Sprintf("/pulls/%d/merge", n)),
+		map[string]string{"sha": sha, "merge_method": "squash"}, &out, true)
+	return out.SHA, err
+}
+
+// UpdatePRBody replaces a PR's body (ticking Renovate's rebase checkbox).
+func (g *GitHub) UpdatePRBody(ctx context.Context, n int, body string) error {
+	return g.c().do(ctx, http.MethodPatch, g.repo(fmt.Sprintf("/pulls/%d", n)), map[string]string{"body": body}, nil, true)
+}
+
+// Status is a commit status.
+type Status struct {
+	ID          int64     `json:"id"`
+	Context     string    `json:"context"`
+	State       string    `json:"state"`
+	Description string    `json:"description"`
+	TargetURL   string    `json:"target_url"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// Statuses lists every status of a commit (newest first, as GitHub returns).
+func (g *GitHub) Statuses(ctx context.Context, sha string) ([]Status, error) {
+	var out []Status
+	err := g.c().do(ctx, http.MethodGet, g.repo("/commits/"+url.PathEscape(sha)+"/statuses?per_page=100"), nil, &out, false)
+	return out, err
+}
+
+// CreateStatus posts a commit status (re-forwarding a lost Gitea status).
+func (g *GitHub) CreateStatus(ctx context.Context, sha string, s Status) error {
+	in := map[string]string{"state": s.State, "context": s.Context, "description": s.Description, "target_url": s.TargetURL}
+	return g.c().do(ctx, http.MethodPost, g.repo("/statuses/"+url.PathEscape(sha)), in, nil, true)
+}
+
+// Latest reduces statuses to the newest per context (by time, then id).
+func Latest(statuses []Status) map[string]Status {
+	sorted := append([]Status(nil), statuses...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if !sorted[i].CreatedAt.Equal(sorted[j].CreatedAt) {
+			return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	out := map[string]Status{}
+	for _, s := range sorted {
+		out[s.Context] = s
+	}
+	return out
+}
+
+// Issue is an issue (the Dependency Dashboard).
+type Issue struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	URL    string `json:"html_url"`
+}
+
+// FindIssue returns the open issue (not PR) with exactly this title.
+func (g *GitHub) FindIssue(ctx context.Context, title string) (Issue, error) {
+	var raw []struct {
+		Issue
+		PullRequest *struct{} `json:"pull_request"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/issues?state=open&per_page=100"), nil, &raw, false); err != nil {
+		return Issue{}, err
+	}
+	for _, i := range raw {
+		if i.PullRequest == nil && i.Title == title {
+			return i.Issue, nil
+		}
+	}
+	return Issue{}, ErrNotFound
+}
+
+// UpdateIssueBody replaces an issue's body (ticking dashboard approvals).
+func (g *GitHub) UpdateIssueBody(ctx context.Context, n int, body string) error {
+	return g.c().do(ctx, http.MethodPatch, g.repo(fmt.Sprintf("/issues/%d", n)), map[string]string{"body": body}, nil, true)
+}
+
+// CreateIssue opens an issue and returns its number and URL.
+func (g *GitHub) CreateIssue(ctx context.Context, title, body string) (int, string, error) {
+	var out Issue
+	err := g.c().do(ctx, http.MethodPost, g.repo("/issues"), map[string]string{"title": title, "body": body}, &out, true)
+	return out.Number, out.URL, err
+}
+
+// RevertPR opens a revert PR for a merged PR (GraphQL revertPullRequest).
+func (g *GitHub) RevertPR(ctx context.Context, nodeID, title, body string) (int, string, error) {
+	q := `mutation($id: ID!, $title: String, $body: String) {
+  revertPullRequest(input: {pullRequestId: $id, title: $title, body: $body}) {
+    revertPullRequest { number url }
+  }
+}`
+	in := map[string]any{"query": q, "variables": map[string]string{"id": nodeID, "title": title, "body": body}}
+	var out struct {
+		Data struct {
+			RevertPullRequest struct {
+				RevertPullRequest struct {
+					Number int    `json:"number"`
+					URL    string `json:"url"`
+				} `json:"revertPullRequest"`
+			} `json:"revertPullRequest"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := g.c().do(ctx, http.MethodPost, "/graphql", in, &out, true); err != nil {
+		return 0, "", err
+	}
+	if len(out.Errors) > 0 {
+		return 0, "", &Error{Status: 422, Method: "POST", Path: "/graphql", Message: out.Errors[0].Message}
+	}
+	r := out.Data.RevertPullRequest.RevertPullRequest
+	return r.Number, r.URL, nil
+}
+
+// CreateBranch creates branch from the head of base.
+func (g *GitHub) CreateBranch(ctx context.Context, branch, base string) error {
+	var ref struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/git/ref/heads/"+base), nil, &ref, false); err != nil {
+		return err
+	}
+	return g.c().do(ctx, http.MethodPost, g.repo("/git/refs"), map[string]string{"ref": "refs/heads/" + branch, "sha": ref.Object.SHA}, nil, true)
+}
+
+// MergeBranch merges head into base (the batch branch); 409 = conflict.
+func (g *GitHub) MergeBranch(ctx context.Context, base, head, message string) error {
+	return g.c().do(ctx, http.MethodPost, g.repo("/merges"), map[string]string{"base": base, "head": head, "commit_message": message}, nil, true)
+}
+
+// CreatePR opens a pull request.
+func (g *GitHub) CreatePR(ctx context.Context, title, head, base, body string) (PR, error) {
+	var raw ghPR
+	err := g.c().do(ctx, http.MethodPost, g.repo("/pulls"), map[string]string{"title": title, "head": head, "base": base, "body": body}, &raw, true)
+	return raw.pr(), err
+}
+
+// Delivery is one webhook delivery.
+type Delivery struct {
+	HookID, ID int64
+	Event      string
+}
+
+// FindDelivery finds, among the newest limit deliveries of every repo hook,
+// a push or pull_request delivery whose payload names sha.
+func (g *GitHub) FindDelivery(ctx context.Context, sha string, limit int) (Delivery, error) {
+	var hooks []struct {
+		ID     int64 `json:"id"`
+		Active bool  `json:"active"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/hooks"), nil, &hooks, false); err != nil {
+		return Delivery{}, err
+	}
+	for _, h := range hooks {
+		if !h.Active {
+			continue
+		}
+		var ds []struct {
+			ID    int64  `json:"id"`
+			Event string `json:"event"`
+		}
+		if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/hooks/%d/deliveries?per_page=%d", h.ID, limit)), nil, &ds, false); err != nil {
+			return Delivery{}, err
+		}
+		for _, d := range ds {
+			if d.Event != "push" && d.Event != "pull_request" {
+				continue
+			}
+			var full struct {
+				Request struct {
+					Payload struct {
+						After       string `json:"after"`
+						PullRequest struct {
+							Head struct {
+								SHA string `json:"sha"`
+							} `json:"head"`
+						} `json:"pull_request"`
+					} `json:"payload"`
+				} `json:"request"`
+			}
+			if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/hooks/%d/deliveries/%d", h.ID, d.ID)), nil, &full, false); err != nil {
+				continue
+			}
+			p := full.Request.Payload
+			if p.After == sha || p.PullRequest.Head.SHA == sha {
+				return Delivery{HookID: h.ID, ID: d.ID, Event: d.Event}, nil
+			}
+		}
+	}
+	return Delivery{}, ErrNotFound
+}
+
+// Redeliver asks GitHub to send a delivery again (re-drives the mirror sync
+// without any cluster write).
+func (g *GitHub) Redeliver(ctx context.Context, d Delivery) error {
+	return g.c().do(ctx, http.MethodPost, g.repo(fmt.Sprintf("/hooks/%d/deliveries/%d/attempts", d.HookID, d.ID)), nil, nil, true)
+}
