@@ -3,6 +3,8 @@ package scrub
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"net/url"
 	"regexp"
 	"sort"
@@ -98,8 +100,12 @@ func (s *Set) Add(kind, value string) {
 // derivedForms returns the encoded forms of v that are stable whatever bytes
 // surround it.
 func derivedForms(v string) []string {
-	out := []string{url.QueryEscape(v), url.PathEscape(v)}
 	b := []byte(v)
+	out := []string{
+		url.QueryEscape(v), url.PathEscape(v),
+		hex.EncodeToString(b), strings.ToUpper(hex.EncodeToString(b)),
+		jsonEscaped(v),
+	}
 	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding} {
 		// Offset 0 with padding: the common "the whole value was encoded".
 		out = append(out, enc.EncodeToString(b))
@@ -164,7 +170,65 @@ type span struct {
 	weight     int // length of the form that produced it
 }
 
-var base64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}={0,2}`)
+// base64Token is a base64 run inside one line.
+var base64Token = regexp.MustCompile(`[A-Za-z0-9+/_-]{4,}={0,2}`)
+
+// base64Line is a line that is nothing but base64 (and indentation).
+var base64Line = regexp.MustCompile(`^[ \t]*[A-Za-z0-9+/_-]{4,}={0,2}[ \t]*$`)
+
+// minBase64Run is the shortest stripped run worth decoding.
+const minBase64Run = 24
+
+var wrapSpace = strings.NewReplacer("\r", "", "\n", "", " ", "", "\t", "")
+
+// base64Runs returns [start, end) spans of base64 runs, including runs
+// WRAPPED across lines (PEM bodies, `base64` output at 64/76 columns,
+// indented YAML block scalars): a run that reaches the end of its line
+// continues through every following line that is nothing but base64. A
+// following line that is not pure base64 ("next: value") ends the run, so
+// surrounding text is not swallowed.
+func base64Runs(text string) [][2]int {
+	type line struct{ start, end int } // end excludes the line break
+	var lines []line
+	for st := 0; st <= len(text); {
+		i := strings.IndexByte(text[st:], '\n')
+		if i < 0 {
+			lines = append(lines, line{st, len(text)})
+			break
+		}
+		end := st + i
+		if end > st && text[end-1] == '\r' {
+			end--
+		}
+		lines = append(lines, line{st, end})
+		st += i + 1
+	}
+	var runs [][2]int
+	for li := 0; li < len(lines); li++ {
+		l := lines[li]
+		toks := base64Token.FindAllStringIndex(text[l.start:l.end], -1)
+		for ti, t := range toks {
+			start, end := l.start+t[0], l.start+t[1]
+			last := ti == len(toks)-1 && strings.TrimRight(text[end:l.end], " \t") == ""
+			next := li
+			if last && !strings.HasSuffix(text[start:end], "=") {
+				for next+1 < len(lines) && base64Line.MatchString(text[lines[next+1].start:lines[next+1].end]) {
+					next++
+					end = lines[next].start + len(strings.TrimRight(text[lines[next].start:lines[next].end], " \t"))
+					if strings.HasSuffix(text[lines[next].start:end], "=") {
+						break // padding ends a blob
+					}
+				}
+			}
+			runs = append(runs, [2]int{start, end})
+			if next != li {
+				li = next
+				break
+			}
+		}
+	}
+	return runs
+}
 
 // literals redacts every registered form found in text.
 func (s *Set) literals(text string, seen func(string)) string {
@@ -187,16 +251,21 @@ func (s *Set) literals(text string, seen func(string)) string {
 			idx = st + 1 // overlapping occurrences too
 		}
 	}
-	// Decode base64-looking runs and look for raw values inside: catches an
-	// encoding the aligned forms cannot (e.g. a value split across lines
-	// before encoding). The whole run is redacted.
-	for _, m := range base64Run.FindAllStringIndex(text, -1) {
-		decoded := decodeLoose(text[m[0]:m[1]])
+	// Decode base64-looking runs (wrapped ones joined first) and look for any
+	// registered form inside: catches what the aligned forms cannot — a
+	// document wrapped at 64/76 columns, a value split across lines before
+	// encoding, one level of double encoding. The WHOLE run is redacted.
+	for _, m := range base64Runs(text) {
+		joined := wrapSpace.Replace(text[m[0]:m[1]])
+		if len(joined) < minBase64Run {
+			continue
+		}
+		decoded := decodeLoose(joined)
 		if decoded == nil {
 			continue
 		}
 		for _, e := range entries {
-			if e.raw && bytes.Contains(decoded, []byte(e.form)) {
+			if bytes.Contains(decoded, []byte(e.form)) {
 				spans = append(spans, span{m[0], m[1], e.kind, len(e.form)})
 				break
 			}
@@ -235,6 +304,16 @@ func (s *Set) literals(text string, seen func(string)) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+// jsonEscaped is v as it appears inside a JSON string (quotes, backslashes,
+// control characters and HTML-sensitive characters escaped).
+func jsonEscaped(v string) string {
+	b, err := json.Marshal(v)
+	if err != nil || len(b) < 2 {
+		return v
+	}
+	return string(b[1 : len(b)-1])
 }
 
 func decodeLoose(run string) []byte {

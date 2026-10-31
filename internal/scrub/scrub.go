@@ -7,13 +7,36 @@
 //  1. Literal set (literal.go) — the FIRST line of defence. Every credential
 //     the console holds or injects (GitHub App token, Gitea token, Telegram
 //     bot token, each session's Omni SA key, talosconfig and kubeconfig
-//     material) is registered with its exact value plus derived forms
-//     (base64 variants, URL escapes, each line of a multi-line value). Known
-//     secrets are replaced wherever they appear, in any shape. Process-wide
-//     credentials go through Register; each session gets its own Set whose
-//     parent is the process-wide one.
+//     material) is registered with its exact value plus derived forms: each
+//     line of a multi-line value, URL query/path escapes, JSON string
+//     escaping, lower/upper hex, and base64 (standard and URL alphabets) at
+//     all three byte alignments. Base64 runs — including runs wrapped across
+//     lines at any width, CRLF or LF, indented with spaces or tabs — are also
+//     decoded and searched for any registered form (one level of double
+//     encoding included); a hit redacts the whole run. Matches from a set and
+//     all its ancestors are merged on the original text and redacted once.
+//     Process-wide credentials go through Register; each session gets its
+//     own Set whose parent is the process-wide one.
 //  2. Patterns (this file) — the SECOND line, for secrets the console never
 //     saw (a token an agent pasted, a key printed by a tool).
+//
+// Transcripts go through Transcript, which first strips terminal escape
+// sequences (a colour code inside a token would otherwise split it).
+//
+// Gaps left consciously (audited 2026-10-31; prefer adding a literal form or
+// a pattern over widening a floor):
+//   - values shorter than 8 characters are not registered (they would redact
+//     ordinary words); pattern floors are also 8;
+//   - a raw (non-base64) secret hard-wrapped mid-value by a terminal or
+//     editor is not rejoined; only base64 runs are;
+//   - encodings beyond the listed forms: base32, compressed-then-encoded,
+//     two levels of base64, double URL-encoding, JSON producers that escape
+//     differently from Go (e.g. "\/"), Unicode escapes of ordinary letters;
+//   - a wrapped base64 run followed by a line that is itself pure base64
+//     (a lone word such as "value") absorbs that line — over-redaction;
+//   - the pattern layer cannot recognise an unknown credential format that
+//     carries no key name (bare hex/base64 with no context) — only the
+//     literal layer catches those, and only for secrets the console knows.
 //
 // The pattern fixtures in testdata/scrub/cases.json are shared with
 // derio-net/frank's scripts/life_scrub.py; keep the two pattern sets in step.
