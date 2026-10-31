@@ -319,3 +319,20 @@ func (g *GitHub) FindDelivery(ctx context.Context, sha string, limit int) (Deliv
 func (g *GitHub) Redeliver(ctx context.Context, d Delivery) error {
 	return g.c().do(ctx, http.MethodPost, g.repo(fmt.Sprintf("/hooks/%d/deliveries/%d/attempts", d.HookID, d.ID)), nil, nil, true)
 }
+
+// Contains reports whether descendant includes ancestor (compare API: the
+// descendant is "ahead" of or "identical" to the ancestor).
+func (g *GitHub) Contains(ctx context.Context, ancestor, descendant string) (bool, error) {
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/compare/"+url.PathEscape(ancestor)+"..."+url.PathEscape(descendant)), nil, &out, false); err != nil {
+		return false, err
+	}
+	return out.Status == "ahead" || out.Status == "identical", nil
+}
+
+// DeleteBranch removes a branch the console created (a stale batch branch).
+func (g *GitHub) DeleteBranch(ctx context.Context, branch string) error {
+	return g.c().do(ctx, http.MethodDelete, g.repo("/git/refs/heads/"+branch), nil, nil, true)
+}

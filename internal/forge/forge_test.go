@@ -260,3 +260,24 @@ func TestGiteaRerunWhenAdvertised(t *testing.T) {
 		t.Error("rerun must POST")
 	}
 }
+
+func TestContainsAndDeleteBranch(t *testing.T) {
+	srv, calls := fake(t, map[string]string{
+		"GET /repos/derio-net/frank/compare/m...later":                        `{"status":"ahead"}`,
+		"GET /repos/derio-net/frank/compare/m...older":                        `{"status":"behind"}`,
+		"DELETE /repos/derio-net/frank/git/refs/heads/cluster-update/batch-1": ``,
+	})
+	g := gh(srv, "tkn")
+	if ok, err := g.Contains(context.Background(), "m", "later"); err != nil || !ok {
+		t.Errorf("ahead: %v %v", ok, err)
+	}
+	if ok, _ := g.Contains(context.Background(), "m", "older"); ok {
+		t.Error("behind must not contain")
+	}
+	if err := g.DeleteBranch(context.Background(), "cluster-update/batch-1"); err != nil {
+		t.Fatal(err)
+	}
+	if (*calls)[len(*calls)-1].Method != http.MethodDelete {
+		t.Error("delete")
+	}
+}
