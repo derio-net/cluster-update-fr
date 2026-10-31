@@ -27,3 +27,6 @@
 
 <!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P4.T1 created=2026-10-31T20:09:54+00:00 phase=4 -->
 ### no-refactor-because-P4.T1 · discovery · no-refactor-because P4.T1: id and lock code are two small pure helpers with one storage path (UpdateBlob) (phase 4)
+
+<!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P4.T2 created=2026-10-31T20:10:01+00:00 phase=4 -->
+### no-refactor-because-P4.T2 · discovery · no-refactor-because P4.T2: the launch path's cleanup was folded into the shared cleanup() in P4.T3.S3 (phase 4)
