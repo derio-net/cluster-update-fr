@@ -1,0 +1,548 @@
+// Package store is the console's state: every update and its lifecycle
+// (R15, R16, R26), History, the engine's ledger (holds, approvals, CI
+// retries) and opaque blobs other packages persist (alarm records, session
+// locks). One JSON file on the PVC, written atomically (temp + rename); a
+// corrupt file is moved aside and the console starts empty with a warning,
+// never a crash.
+package store
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/derio-net/cluster-update-fr/internal/engine"
+	"github.com/derio-net/cluster-update-fr/internal/live"
+	"github.com/derio-net/cluster-update-fr/internal/scrub"
+)
+
+// State is an update's lifecycle state. The single enum used by the store,
+// the metrics and the UI.
+type State string
+
+// States: pending → approved → merged → applied → verified, or failed,
+// rolled-back, held, abandoned.
+const (
+	Pending    State = "pending"
+	Approved   State = "approved"
+	Merged     State = "merged"
+	Applied    State = "applied"
+	Verified   State = "verified"
+	Failed     State = "failed"
+	RolledBack State = "rolled-back"
+	Held       State = "held"
+	Abandoned  State = "abandoned"
+)
+
+// AllStates lists every state, in display order.
+var AllStates = []State{Pending, Approved, Held, Merged, Applied, Verified, Failed, RolledBack, Abandoned}
+
+// Label is the console's wording; merged and applied are "rolled out,
+// unverified" until verification passes (R16).
+func (s State) Label() string {
+	switch s {
+	case Merged:
+		return "merged, not yet applied"
+	case Applied:
+		return "rolled out, unverified"
+	}
+	return string(s)
+}
+
+// Terminal reports a state nothing leaves.
+func (s State) Terminal() bool { return s == Verified || s == RolledBack || s == Abandoned }
+
+var legal = map[State][]State{
+	Pending:  {Approved, Held, Merged, Failed, Abandoned},
+	Approved: {Merged, Held, Failed, Abandoned, Pending},
+	Held:     {Pending, Approved, Abandoned, Failed},
+	Merged:   {Applied, Failed, RolledBack},
+	Applied:  {Verified, Failed, RolledBack},
+	Failed:   {RolledBack, Abandoned, Pending, Merged},
+	Verified: {RolledBack},
+}
+
+// Errors.
+var (
+	ErrIllegal     = errors.New("store: illegal state transition")
+	ErrUnknown     = errors.New("store: no such update")
+	ErrNeedsReason = errors.New("store: a failure state needs a named reason")
+)
+
+// Update is one update's record.
+type Update struct {
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Cluster      string    `json:"cluster,omitempty"`
+	Apps         []string  `json:"apps,omitempty"`
+	Kind         string    `json:"kind,omitempty"` // image | chart | talos | kubernetes | omni | batch
+	Name         string    `json:"name,omitempty"`
+	From         string    `json:"from,omitempty"`
+	To           string    `json:"to,omitempty"`
+	Path         string    `json:"path,omitempty"`
+	PR           int       `json:"pr,omitempty"`
+	MergeSHA     string    `json:"merge_sha,omitempty"`
+	Approver     string    `json:"approver,omitempty"`
+	State        State     `json:"state"`
+	Reason       string    `json:"reason,omitempty"`
+	Since        time.Time `json:"since"`
+	Rollout      string    `json:"rollout,omitempty"`
+	Verification string    `json:"verification,omitempty"`
+	Rollback     string    `json:"rollback,omitempty"`
+	Session      string    `json:"session,omitempty"`
+	Transcript   string    `json:"transcript,omitempty"` // scrubbed
+}
+
+// Event is one History entry.
+type Event struct {
+	At           time.Time `json:"at"`
+	Update       string    `json:"update"`
+	Action       string    `json:"action"`
+	From         State     `json:"from,omitempty"`
+	To           State     `json:"to,omitempty"`
+	By           string    `json:"by,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	PR           int       `json:"pr,omitempty"`
+	SHA          string    `json:"sha,omitempty"`
+	Rollout      string    `json:"rollout,omitempty"`
+	Verification string    `json:"verification,omitempty"`
+}
+
+type data struct {
+	Updates   map[string]*Update         `json:"updates"`
+	History   []Event                    `json:"history"`
+	Holds     map[string]string          `json:"holds"`
+	Approvals map[string]string          `json:"approvals"`
+	Retries   map[string]int             `json:"retries"`
+	Blobs     map[string]json.RawMessage `json:"blobs"`
+}
+
+// Store is safe for concurrent use.
+type Store struct {
+	mu      sync.Mutex
+	path    string
+	now     func() time.Time
+	d       data
+	Warning string // set when the state file was unreadable at Open
+}
+
+// maxHistory bounds the history kept in the file.
+const maxHistory = 5000
+
+// Open loads dir/state.json (or starts empty).
+func Open(dir string, now func() time.Time) (*Store, error) {
+	if now == nil {
+		now = time.Now
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	s := &Store{path: filepath.Join(dir, "state.json"), now: now}
+	s.d = empty()
+	b, err := os.ReadFile(s.path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return s, nil
+	case err != nil:
+		return nil, err
+	}
+	var d data
+	if err := json.Unmarshal(b, &d); err != nil {
+		aside := fmt.Sprintf("%s.corrupt-%d", s.path, now().Unix())
+		_ = os.Rename(s.path, aside)
+		s.Warning = "state file was unreadable and was moved to " + filepath.Base(aside) + "; started empty"
+		return s, nil
+	}
+	s.d = d
+	s.fill()
+	return s, nil
+}
+
+func empty() data {
+	return data{Updates: map[string]*Update{}, Holds: map[string]string{}, Approvals: map[string]string{}, Retries: map[string]int{}, Blobs: map[string]json.RawMessage{}}
+}
+
+func (s *Store) fill() {
+	e := empty()
+	if s.d.Updates == nil {
+		s.d.Updates = e.Updates
+	}
+	if s.d.Holds == nil {
+		s.d.Holds = e.Holds
+	}
+	if s.d.Approvals == nil {
+		s.d.Approvals = e.Approvals
+	}
+	if s.d.Retries == nil {
+		s.d.Retries = e.Retries
+	}
+	if s.d.Blobs == nil {
+		s.d.Blobs = e.Blobs
+	}
+}
+
+// Save writes the state atomically.
+func (s *Store) Save() error {
+	s.mu.Lock()
+	b, err := json.MarshalIndent(s.d, "", " ")
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	tmp := s.path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.Rename(tmp, s.path)
+}
+
+// Track registers an update as pending if it is not known yet; known
+// updates keep their state but refresh descriptive fields.
+func (s *Store) Track(u Update) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.d.Updates[u.ID]; ok {
+		if u.Title != "" {
+			cur.Title = u.Title
+		}
+		if u.Rollback != "" {
+			cur.Rollback = u.Rollback
+		}
+		if len(u.Apps) > 0 {
+			cur.Apps = u.Apps
+		}
+		return
+	}
+	u.State, u.Since = Pending, s.now()
+	cp := u
+	s.d.Updates[u.ID] = &cp
+}
+
+// Get returns a copy of an update.
+func (s *Store) Get(id string) (Update, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.d.Updates[id]
+	if !ok {
+		return Update{}, false
+	}
+	return *u, true
+}
+
+// Updates returns copies of every update, newest state change first.
+func (s *Store) Updates() []Update {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Update, 0, len(s.d.Updates))
+	for _, u := range s.d.Updates {
+		out = append(out, *u)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Since.Equal(out[j].Since) {
+			return out[i].Since.After(out[j].Since)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// Transition moves an update to state to; with (optional) edits the record
+// first. Failure states need a reason.
+func (s *Store) Transition(id string, to State, by, reason string, with func(*Update)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.transition(id, to, by, reason, with)
+}
+
+func (s *Store) transition(id string, to State, by, reason string, with func(*Update)) error {
+	u, ok := s.d.Updates[id]
+	if !ok {
+		return ErrUnknown
+	}
+	if (to == Failed || to == Abandoned || to == RolledBack) && strings.TrimSpace(reason) == "" {
+		return ErrNeedsReason
+	}
+	allowed := false
+	for _, next := range legal[u.State] {
+		if next == to {
+			allowed = true
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("%w: %s → %s", ErrIllegal, u.State, to)
+	}
+	if with != nil {
+		with(u)
+	}
+	from := u.State
+	u.State, u.Since, u.Reason = to, s.now(), scrub.String(reason)
+	s.appendEvent(Event{At: s.now(), Update: id, Action: "state", From: from, To: to, By: by, Reason: u.Reason,
+		PR: u.PR, SHA: u.MergeSHA, Rollout: u.Rollout, Verification: u.Verification})
+	return nil
+}
+
+func (s *Store) appendEvent(e Event) {
+	e.Reason = scrub.String(e.Reason)
+	s.d.History = append(s.d.History, e)
+	if n := len(s.d.History); n > maxHistory {
+		s.d.History = s.d.History[n-maxHistory:]
+	}
+}
+
+// AddEvent appends a free-form History entry (session start/end, cleanup).
+func (s *Store) AddEvent(e Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.At.IsZero() {
+		e.At = s.now()
+	}
+	s.appendEvent(e)
+}
+
+// History returns the events for update id ("" = all), newest first.
+func (s *Store) History(id string) []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Event
+	for i := len(s.d.History) - 1; i >= 0; i-- {
+		if id == "" || s.d.History[i].Update == id {
+			out = append(out, s.d.History[i])
+		}
+	}
+	return out
+}
+
+// CountByState counts updates per state (every state present, zero or not).
+func (s *Store) CountByState() map[State]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[State]int{}
+	for _, st := range AllStates {
+		out[st] = 0
+	}
+	for _, u := range s.d.Updates {
+		out[u.State]++
+	}
+	return out
+}
+
+// --- engine.Ledger ---------------------------------------------------------
+
+// Hold implements engine.Ledger.
+func (s *Store) Hold(id string) (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	by, ok := s.d.Holds[id]
+	return ok, by
+}
+
+// SetHold implements engine.Ledger.
+func (s *Store) SetHold(id string, held bool, by string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if held {
+		s.d.Holds[id] = by
+	} else {
+		delete(s.d.Holds, id)
+	}
+}
+
+// Approved implements engine.Ledger.
+func (s *Store) Approved(id string) (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	by, ok := s.d.Approvals[id]
+	return ok, by
+}
+
+// SetApproved implements engine.Ledger.
+func (s *Store) SetApproved(id, by string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.d.Approvals[id] = by
+}
+
+// Retries implements engine.Ledger.
+func (s *Store) Retries(id, sha string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.d.Retries[id+"@"+sha]
+}
+
+// AddRetry implements engine.Ledger.
+func (s *Store) AddRetry(id, sha string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.d.Retries[id+"@"+sha]++
+}
+
+// Record implements engine.Ledger: engine actions drive update states.
+func (s *Store) Record(e engine.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.d.Updates[e.Item]; !ok {
+		kind := ""
+		if strings.HasPrefix(e.Item, "batch-") {
+			kind = "batch"
+		}
+		s.d.Updates[e.Item] = &Update{ID: e.Item, Title: e.Detail, Kind: kind, PR: e.PR, State: Pending, Since: s.now()}
+	}
+	u := s.d.Updates[e.Item]
+	s.appendEvent(Event{At: e.At, Update: e.Item, Action: e.Action, By: e.By, Reason: e.Detail, PR: e.PR, SHA: e.SHA})
+	switch e.Action {
+	case "approved", "batch-approved":
+		_ = s.transition(e.Item, Approved, e.By, "", func(u *Update) { u.Approver = e.By })
+	case "merged":
+		_ = s.transition(e.Item, Merged, e.By, "", func(u *Update) {
+			u.MergeSHA, u.PR = e.SHA, e.PR
+			if u.Approver == "" {
+				u.Approver = e.By
+			}
+		})
+	case "held":
+		_ = s.transition(e.Item, Held, e.By, "held by "+e.By, nil)
+	case "released":
+		if u.State == Held {
+			_ = s.transition(e.Item, Pending, e.By, "", nil)
+		}
+	case "failed-ci":
+		_ = s.transition(e.Item, Failed, e.By, "failed — CI: "+e.Detail, nil)
+	case "revert-opened":
+		if u.State == Merged || u.State == Applied || u.State == Verified || u.State == Failed {
+			_ = s.transition(e.Item, RolledBack, e.By, "revert PR #"+fmt.Sprint(e.PR)+" opened", nil)
+		}
+	}
+}
+
+var _ engine.Ledger = (*Store)(nil)
+
+// --- blobs ------------------------------------------------------------------
+
+// GetBlob decodes the blob stored under key into out (false if absent).
+func (s *Store) GetBlob(key string, out any) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.d.Blobs[key]
+	if !ok {
+		return false
+	}
+	return json.Unmarshal(b, out) == nil
+}
+
+// PutBlob stores v under key.
+func (s *Store) PutBlob(key string, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.d.Blobs[key] = b
+	return nil
+}
+
+// Update mutates a blob atomically under the store lock: fn gets the current
+// raw value (nil if absent) and returns the new one.
+func (s *Store) UpdateBlob(key string, fn func(cur json.RawMessage) (json.RawMessage, error)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next, err := fn(s.d.Blobs[key])
+	if err != nil {
+		return err
+	}
+	s.d.Blobs[key] = next
+	return nil
+}
+
+// --- reconciliation (R26) ---------------------------------------------------
+
+// Cleanup kinds.
+const (
+	CleanupPod    = "delete-session-pod"
+	CleanupBranch = "delete-batch-branch"
+)
+
+// Cleanup is a leftover the caller must remove.
+type Cleanup struct {
+	Kind, Target, Reason string
+}
+
+// ReconcileInput is what reconciliation compares against.
+type ReconcileInput struct {
+	OpenPRs       map[int]bool
+	MergedPRs     map[int]string // number -> merge sha (closed AND merged)
+	SessionPods   []live.Pod     // pods in the session namespace
+	StaleBranches []string       // cluster-update/batch-* branches with no open PR
+	ApplyTimeout  time.Duration  // merged → applied
+	VerifyTimeout time.Duration  // applied → verified
+}
+
+// Reconcile turns every leftover into a named state and lists what must be
+// cleaned up: updates whose PR closed unmerged are abandoned, merged updates
+// never applied (and applied ones never verified) fail with the reason
+// named, session pods with no open update and batch branches with no open PR
+// are listed for deletion.
+func (s *Store) Reconcile(in ReconcileInput) []Cleanup {
+	if in.ApplyTimeout == 0 {
+		in.ApplyTimeout = 2 * time.Hour
+	}
+	if in.VerifyTimeout == 0 {
+		in.VerifyTimeout = time.Hour
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	var out []Cleanup
+	for id, u := range s.d.Updates {
+		switch u.State {
+		case Pending, Approved, Held:
+			if u.PR > 0 && !in.OpenPRs[u.PR] {
+				if sha, ok := in.MergedPRs[u.PR]; ok {
+					_ = s.transition(id, Merged, "reconciler", "", func(u *Update) { u.MergeSHA = sha })
+					continue
+				}
+				_ = s.transition(id, Abandoned, "reconciler", fmt.Sprintf("PR #%d closed without merging", u.PR), nil)
+			}
+		case Merged:
+			if now.Sub(u.Since) > in.ApplyTimeout {
+				_ = s.transition(id, Failed, "reconciler", fmt.Sprintf("merged but not applied after %s: ArgoCD's last sync operation never reached the merge commit — needs you", in.ApplyTimeout), nil)
+			}
+		case Applied:
+			if now.Sub(u.Since) > in.VerifyTimeout {
+				_ = s.transition(id, Failed, "reconciler", fmt.Sprintf("applied but the smoke test did not pass within %s — needs you", in.VerifyTimeout), nil)
+			}
+		}
+	}
+	for _, p := range in.SessionPods {
+		id := p.Labels["fr.run/id"]
+		u, ok := s.d.Updates[id]
+		if !ok || u.State.Terminal() || u.State == Failed {
+			out = append(out, Cleanup{Kind: CleanupPod, Target: p.Name, Reason: "no open update for session " + id})
+		}
+	}
+	for _, b := range in.StaleBranches {
+		out = append(out, Cleanup{Kind: CleanupBranch, Target: b, Reason: "batch branch with no open PR"})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Target < out[j].Target })
+	return out
+}
