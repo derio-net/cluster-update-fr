@@ -1,0 +1,65 @@
+schema_version: 2
+phase:
+  number: 5
+  title: The console pages and the main loop (R13, R18 display, R19 display)
+  tag: agentic
+  depends_on:
+  - 4
+  tracking_issue: null
+  tier: standard
+  files:
+  - internal/web/**
+  - internal/app/**
+  - cmd/cluster-update-fr/**
+  - README.md
+  - testdata/**
+  - docs/superpowers/plans/**
+  estimate_lines: 1200
+tasks:
+- number: 1
+  title: Pages and auth (red → green)
+  steps:
+  - id: P5.T1.S1
+    text: |-
+      Write internal/web/web_test.go with httptest: every route except /healthz and /metrics returns 401 without the trusted header X-authentik-username (and the header value is never echoed unescaped); GET / renders "Needs action" with sections Security (first), Suggested batch, Auto-merge countdowns, Guided upgrades, Rollouts needing a decision, Held — CI; /inventory renders cluster → service → dependency with declared/running/latest/gap/vulns/path; /history renders events with approver, PR, rollout and verification; every item shows its rollback path before its approve button; a rendered page never contains a token (scrub.Find over the response body == nil, fixture state seeded with tokens in reason strings). Run: FAILS.
+  - id: P5.T1.S2
+    text: |-
+      Implement internal/web with html/template (no JS framework; buttons are POST forms with a per-request CSRF token bound to the user). Run: ok.
+- number: 2
+  title: Actions and the main loop (red → green → refactor)
+  steps:
+  - id: P5.T2.S1
+    text: |-
+      Extend web_test.go: POST /act/{hold,merge-now,approve-now,approve-batch,retry-ci,start-session,end-session,revert} call the engine/session with the authenticated user as approver and redirect back; start-session twice returns the same session (attach link to runs-fr with ?run=<upgrade-id>); a lock conflict renders the holder's name. Write internal/app/app_test.go: one Cycle(ctx) with fakes reads repo+live+forges, rebuilds the inventory, runs engine.Tick, verifier, alarms, reaper, persists, and a failing source (e.g. Hop unreachable) marks only its rows unknown while the cycle still completes. Run: FAILS.
+  - id: P5.T2.S2
+    text: |-
+      Implement the handlers, internal/app and main.go wiring (cycle every SCAN_INTERVAL, default 5m; graceful shutdown). Run: ok.
+  - id: P5.T2.S3
+    text: |-
+      Refactor and document: README gains configuration (env table), the interface contract (image, metrics, labels, env, header) and a run-locally section. Run `go vet ./... && go test ./... -race`: ok.
+state:
+  steps:
+    P5.T1.S1:
+      state: ' '
+      ticked_at: null
+      note: null
+    P5.T1.S2:
+      state: ' '
+      ticked_at: null
+      note: null
+    P5.T2.S1:
+      state: ' '
+      ticked_at: null
+      note: null
+    P5.T2.S2:
+      state: ' '
+      ticked_at: null
+      note: null
+    P5.T2.S3:
+      state: ' '
+      ticked_at: null
+      note: null
+  completion:
+    at: null
+    note: null
+    observed_prs: []

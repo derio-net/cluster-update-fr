@@ -1,0 +1,100 @@
+schema_version: 2
+phase:
+  number: 2
+  title: Forge engine — countdowns, batch, security, rollback, CI diagnosis (R6, R7,
+    R9, R14, R19, R28)
+  tag: agentic
+  depends_on:
+  - 1
+  tracking_issue: null
+  tier: standard
+  files:
+  - internal/forge/**
+  - internal/renovate/**
+  - internal/engine/**
+  - internal/cidiag/**
+  - testdata/**
+  - docs/superpowers/plans/**
+  estimate_lines: 1500
+tasks:
+- number: 1
+  title: Forge clients (red → green)
+  steps:
+  - id: P2.T1.S1
+    text: |-
+      Write internal/forge/github_test.go and gitea_test.go against httptest: list open PRs by label/author renovate, get PR (mergeable, head sha, body), merge (squash, expected head sha), combined statuses, create status, update PR body, update issue body, create PR (revert), create issue, list hook deliveries + get one + redeliver; Gitea: list runs by head_sha, list jobs of a run, list commit statuses, and a capability probe reading /swagger.v1.json for a rerun path. Every error body passes through scrub.String before it is wrapped. Run: FAILS.
+  - id: P2.T1.S2
+    text: |-
+      Implement internal/forge (net/http, token from config; nil token → every call returns ErrNoCredential, the UI shows the action disabled). Run: ok.
+- number: 2
+  title: Renovate PR and Dependency Dashboard parsing (red → green)
+  steps:
+  - id: P2.T2.S1
+    text: |-
+      Write internal/renovate/renovate_test.go on fixture bodies in testdata/renovate/: parse a Renovate PR body into {depName, from, to, updateType, groupName, security (label "security" or "[SECURITY]" title)}; find and tick the `<!-- rebase-check -->` checkbox; parse the Dependency Dashboard issue's `<!-- approve-branch=… -->` / `<!-- approvePr-branch=… -->` / `<!-- unlimit-branch=… -->` checkboxes; Tick(body, branch) and Untick return a new body and are idempotent. Run: FAILS.
+  - id: P2.T2.S2
+    text: |-
+      Implement internal/renovate. Run: ok.
+- number: 3
+  title: Merge engine — countdown, hold, merge-now, batch, security first (red → green)
+  steps:
+  - id: P2.T3.S1
+    text: |-
+      Write internal/engine/engine_test.go with a fake clock and fake forge: an auto-merge item's MergeAt = max(release time + minimumReleaseAge, PR opened + policy merge window); Tick merges it only when now ≥ MergeAt AND CI passed AND not held; Hold blocks merging and is recorded; MergeNow merges with CI passed even before MergeAt and refuses without passing CI; the console merges with the expected head sha so a moved PR is not merged blind; every merge emits a History event (approver auto|operator). Batch: SuggestBatch returns batch-approve items not held/security; ApproveBatch(edited set) ticks exactly those approvals on the dashboard and unticks the rest, producing one Renovate group PR. Security: items carrying a fixable vuln at/above threshold sort first and expose ApproveNow (auto-merge/batch-approve) or StartSession (session path). Rollback text per path (R19): revert PR for chart/image, snapshot+restore for stateful, Omni revert / talosctl rollback for OS, one-way warning for Kubernetes minors. Run: FAILS.
+  - id: P2.T3.S2
+    text: |-
+      Implement internal/engine. Run: ok.
+- number: 4
+  title: CI diagnosis and one-retry recovery (red → green → refactor)
+  steps:
+  - id: P2.T4.S1
+    text: |-
+      Write internal/cidiag/cidiag_test.go: no conclusive GitHub status within the timeout → diagnose. (a) Gitea has a terminal status for the head SHA and GitHub lacks the matching `gitea-actions/<context>` → StatusLost, recovery re-posts it with the bridge mapping (skipped/warning → success with "Gitea: <state>"); (b) no Gitea run for the head SHA → NeverRan: PR not mergeable → tick Renovate's rebase checkbox, else redeliver the GitHub push/pull_request delivery whose payload names that SHA; (c) Gitea run concluded failure → RanFailed: rerun via the Gitea API when the probe found one, else fallback tick the rebase checkbox; NEVER an empty commit (assert no create-commit call exists on the fake). One retry only: a second failure after a recorded retry → FailedCI. Auto-merge items auto-retry the RanFailed case once; every other case waits for the button. Run: FAILS.
+  - id: P2.T4.S2
+    text: |-
+      Implement internal/cidiag. Run: ok.
+  - id: P2.T4.S3
+    text: |-
+      Refactor: the status forwarding mapping lives in one function shared by diagnosis and recovery. Run `go test ./...`: ok.
+state:
+  steps:
+    P2.T1.S1:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T1.S2:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T2.S1:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T2.S2:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T3.S1:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T3.S2:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T4.S1:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T4.S2:
+      state: ' '
+      ticked_at: null
+      note: null
+    P2.T4.S3:
+      state: ' '
+      ticked_at: null
+      note: null
+  completion:
+    at: null
+    note: null
+    observed_prs: []
