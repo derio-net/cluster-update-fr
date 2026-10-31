@@ -32,9 +32,22 @@ func (t Telegram) Configured() bool {
 
 // Config is the full runtime configuration.
 type Config struct {
-	Listen     string
-	AuthHeader string // trusted header set (and overwritten) by Authentik forward-auth
-	ConsoleURL string // public URL used in Telegram links
+	Listen        string // UI (pages + actions; only Traefik may reach it)
+	OpsListen     string // /healthz + /metrics
+	SessionListen string // session step/finish API (session pods only)
+	SessionAPIURL string // how a session pod reaches SessionListen
+	ConsoleURL    string // public URL used in Telegram links
+
+	// Identity (see internal/identity): JWT mode when the JWKS URL, issuer
+	// and audience are set; else proxy-secret mode when the secret file is
+	// set; else every UI request is refused.
+	JWKSURL         string
+	JWTIssuer       string
+	JWTAudience     string
+	ProxySecretFile string
+	OperatorGroup   string
+
+	VictoriaLogsURL string // where Frank's hop-scan job's results land
 
 	FrankRepo string // owner/name of the declarations repo on GitHub
 	FrankRef  string
@@ -104,8 +117,16 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	c := &Config{
 		Listen:           get("LISTEN", ":8080"),
-		AuthHeader:       get("AUTH_HEADER", "X-authentik-username"),
+		OpsListen:        get("OPS_LISTEN", ":9090"),
+		SessionListen:    get("SESSION_API_LISTEN", ":8081"),
+		SessionAPIURL:    strings.TrimRight(get("SESSION_API_URL", ""), "/"),
 		ConsoleURL:       get("CONSOLE_URL", "https://updates.cluster.derio.net"),
+		JWKSURL:          get("AUTHENTIK_JWKS_URL", ""),
+		JWTIssuer:        get("AUTHENTIK_ISSUER", ""),
+		JWTAudience:      get("AUTHENTIK_AUDIENCE", ""),
+		ProxySecretFile:  get("PROXY_SECRET_FILE", ""),
+		OperatorGroup:    get("OPERATOR_GROUP", ""),
+		VictoriaLogsURL:  strings.TrimRight(get("VICTORIALOGS_URL", ""), "/"),
 		FrankRepo:        get("FRANK_REPO", "derio-net/frank"),
 		FrankRef:         get("FRANK_REF", "main"),
 		GitHubAPI:        strings.TrimRight(get("GITHUB_API", "https://api.github.com"), "/"),

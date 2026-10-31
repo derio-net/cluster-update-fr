@@ -31,8 +31,11 @@ func TestLoadDefaultsWithNothingSet(t *testing.T) {
 	if c.Listen != ":8080" {
 		t.Errorf("Listen = %q, want :8080", c.Listen)
 	}
-	if c.AuthHeader != "X-authentik-username" {
-		t.Errorf("AuthHeader = %q", c.AuthHeader)
+	if c.OpsListen != ":9090" || c.SessionListen != ":8081" {
+		t.Errorf("listeners = %q %q", c.OpsListen, c.SessionListen)
+	}
+	if c.JWKSURL != "" || c.ProxySecretFile != "" || c.OperatorGroup != "" {
+		t.Error("identity verification must not be configured by default (the UI fails closed)")
 	}
 	if c.FrankRepo != "derio-net/frank" {
 		t.Errorf("FrankRepo = %q", c.FrankRepo)
