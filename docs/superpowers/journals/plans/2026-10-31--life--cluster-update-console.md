@@ -21,3 +21,6 @@
 
 <!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P3.T2 created=2026-10-31T19:57:03+00:00 phase=3 -->
 ### no-refactor-because-P3.T2 · discovery · no-refactor-because P3.T2: verify is pure functions over inputs; no duplication between workload and OS paths beyond the smoke summary helper (phase 3)
+
+<!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P3.T3 created=2026-10-31T19:57:06+00:00 phase=3 -->
+### no-refactor-because-P3.T3 · discovery · no-refactor-because P3.T3: alarm and telegram are separate small packages; formatting shares one escape helper (phase 3)
