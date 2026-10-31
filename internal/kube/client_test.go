@@ -76,13 +76,30 @@ func TestWritesOutsideTheSessionNamespaceNeverLeave(t *testing.T) {
 		t.Fatalf("write without policy: %v", err)
 	}
 	c.Writes = &WritePolicy{SessionNamespace: "upgrade-sessions"}
+	const ns = "upgrade-sessions"
 	for _, bad := range []struct{ ns, res, name string }{
 		{"default", "pods", "x"},
-		{"upgrade-sessions", "deployments", "x"},
-		{"upgrade-sessions", "configmaps", "x"},
+		{ns, "deployments", "x"},
+		{ns, "configmaps", "x"},
+		{ns, "roles", "upgrade-session-x"},
+		{ns, "clusterrolebindings", "upgrade-session-x"},
+		{ns, "nodes", "mini-1"},
 		{"paperclip", "secrets", "x"},
-		{"paperclip", "rolebindings", "not-ours"},
-		{"paperclip", "roles", "upgrade-session-x"},
+		{"paperclip", "rolebindings", "upgrade-session-x"}, // other namespace, even with our prefix
+		// validator/request differentials: names that would re-route the path
+		{ns, "rolebindings", "upgrade-session-x/../../../apis/rbac.authorization.k8s.io/v1/clusterrolebindings/foo"},
+		{ns, "pods", "../secrets/x"},
+		{ns, "pods", "x%2F..%2Fsecrets"},
+		{ns, "pods", "x?dryRun=All"},
+		{ns, "pods", "x#frag"},
+		{ns, "pods", "X-Upper"},
+		{ns, "pods", "-leading"},
+		{ns, "pods", "trailing-"},
+		{ns, "pods", "dot.ted"},
+		{ns, "pods", ""},
+		{ns, "pods", strings.Repeat("a", 254)},
+		{ns + "/../kube-system", "pods", "x"},
+		{"Upgrade-Sessions", "pods", "x"},
 	} {
 		obj := map[string]any{"metadata": map[string]any{"name": bad.name}}
 		if err := c.Create(ctx, bad.ns, bad.res, obj); !errors.Is(err, ErrForbiddenWrite) {
@@ -95,10 +112,17 @@ func TestWritesOutsideTheSessionNamespaceNeverLeave(t *testing.T) {
 	if n := atomic.LoadInt32(calls); n != 0 {
 		t.Fatalf("refused writes must not reach the API server, saw %d calls", n)
 	}
+	// The body's own namespace must agree with the URL's.
+	if err := c.Create(ctx, ns, "pods", map[string]any{"metadata": map[string]any{"name": "s-1", "namespace": "kube-system"}}); !errors.Is(err, ErrForbiddenWrite) {
+		t.Errorf("mismatched metadata.namespace: %v", err)
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Fatalf("refused writes must not reach the API server, saw %d calls", n)
+	}
 	for _, ok := range []struct{ ns, res, name string }{
-		{"upgrade-sessions", "pods", "s-1"},
-		{"upgrade-sessions", "secrets", "s-1-creds"},
-		{"paperclip", "rolebindings", "upgrade-session-s-1"},
+		{ns, "pods", "s-1"},
+		{ns, "secrets", "s-1-creds"},
+		{ns, "rolebindings", "upgrade-session-s-1"},
 	} {
 		obj := map[string]any{"metadata": map[string]any{"name": ok.name}}
 		if err := c.Create(ctx, ok.ns, ok.res, obj); err != nil {
@@ -170,5 +194,11 @@ users:
 	}
 	if _, err := FromKubeconfig(filepath.Join(dir, "missing")); err == nil {
 		t.Error("missing kubeconfig must error")
+	}
+}
+
+func TestPathSegmentsAreEscaped(t *testing.T) {
+	if p := ObjectPath("upgrade-sessions", "pods", "a/../b?c"); strings.Contains(p, "/../") || strings.Contains(p, "?") {
+		t.Errorf("ObjectPath not escaped: %q", p)
 	}
 }
