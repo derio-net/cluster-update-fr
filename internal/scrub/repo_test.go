@@ -39,7 +39,11 @@ func TestRepositoryHoldsNoTokens(t *testing.T) {
 			return nil
 		}
 		checked++
-		if found := Find(string(b)); len(found) != 0 {
+		found := Find(string(b))
+		if strings.HasSuffix(path, ".go") {
+			found = findInGoSource(string(b))
+		}
+		if len(found) != 0 {
 			rel, _ := filepath.Rel(root, path)
 			t.Errorf("%s contains token-shaped strings: %v", rel, found)
 		}
@@ -76,4 +80,19 @@ func isBinary(b []byte) bool {
 		n = 8000
 	}
 	return strings.ContainsRune(string(b[:n]), 0)
+}
+
+// findInGoSource is Find without the unquoted key/value variant, which reads
+// Go expressions as values; quoted literals and every token format still
+// count.
+func findInGoSource(text string) []string {
+	var kinds []string
+	seen := map[string]bool{}
+	applyPatterns(global.literals(text, func(string) {}), func(k string) {
+		if !seen[k] {
+			seen[k] = true
+			kinds = append(kinds, k)
+		}
+	}, true)
+	return kinds
 }

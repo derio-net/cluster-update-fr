@@ -350,3 +350,6 @@ func (s *Set) Find(text string) []string {
 	apply(s.literals(text, add), add)
 	return kinds
 }
+
+// Global returns the process-wide literal set (parent of every session set).
+func Global() *Set { return global }

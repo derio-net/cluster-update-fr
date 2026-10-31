@@ -72,6 +72,11 @@ type pattern struct {
 	// trimRight strips these trailing bytes from the secret span (a
 	// separator the value class could not exclude without leaking).
 	trimRight string
+	// codeNoise marks the unquoted key/value variant, which also matches Go
+	// expressions (`secret := f(...)`). Redaction always applies it; only the
+	// repository guard skips it for Go source, where a hard-coded secret
+	// would be a quoted literal (still checked).
+	codeNoise bool
 }
 
 const secretKeys = `(?:token|access_token|refresh_token|client-key-data|client-certificate-data|key|crt|ca|password|passwd|pass|secret|client_secret|private_key|api_key|apikey)`
@@ -110,7 +115,7 @@ var patterns = []pattern{
 	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `'([^'\n]{8,})'`)},
 	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `"([^"\n]{8,})`)},
 	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `'([^'\n]{8,})`)},
-	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `([^\s"'` + "`" + `]{8,})`), trimRight: ",}"},
+	{kind: "yaml-secret", re: regexp.MustCompile(`(?i)\b` + secretKeys + `["']?` + sep + `([^\s"'` + "`" + `]{8,})`), trimRight: ",}", codeNoise: true},
 }
 
 // sep is the key/value separator: ':' or '=', optionally followed by a line
@@ -149,6 +154,9 @@ type hit struct {
 // (bad left boundary) resumes scanning one byte after its start, so an
 // overlapping valid match is not skipped.
 func (p pattern) matches(text string) []hit {
+	if !p.re.MatchString(text) { // cheaper than submatch extraction; most text is clean
+		return nil
+	}
 	var hits []hit
 	pos := 0
 	for pos <= len(text) {
@@ -186,9 +194,16 @@ func (p pattern) matches(text string) []hit {
 
 // apply redacts until stable, calling seen for every redacted hit.
 func apply(text string, seen func(kind string)) string {
+	return applyPatterns(text, seen, false)
+}
+
+func applyPatterns(text string, seen func(kind string), skipCodeNoise bool) string {
 	for i := 0; i < 8; i++ {
 		changed := false
 		for _, p := range patterns {
+			if skipCodeNoise && p.codeNoise {
+				continue
+			}
 			hits := p.matches(text)
 			if hits == nil {
 				continue
