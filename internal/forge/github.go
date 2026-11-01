@@ -204,6 +204,71 @@ func (g *GitHub) CreateStatus(ctx context.Context, sha string, s Status) error {
 	return g.c().do(ctx, http.MethodPost, g.repo("/statuses/"+url.PathEscape(sha)), in, nil, true)
 }
 
+// CheckRun is a GitHub check-run (frank's CI: GitHub Actions jobs).
+type CheckRun struct {
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	HeadSHA     string    `json:"head_sha"`
+	Status      string    `json:"status"`     // queued | in_progress | completed | …
+	Conclusion  string    `json:"conclusion"` // success | failure | neutral | skipped | …
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
+	DetailsURL  string    `json:"details_url"`
+	// App is the GitHub App that created the check-run; only the GitHub
+	// Actions app's (slug github-actions) count as CI.
+	App struct {
+		Slug string `json:"slug"`
+	} `json:"app"`
+	CheckSuite struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite"`
+}
+
+// CheckRuns lists the check-runs of a commit (GitHub's default filter: the
+// latest attempt of each).
+func (g *GitHub) CheckRuns(ctx context.Context, sha string) ([]CheckRun, error) {
+	var out struct {
+		Total int        `json:"total_count"`
+		Runs  []CheckRun `json:"check_runs"`
+	}
+	err := g.c().do(ctx, http.MethodGet, g.repo("/commits/"+url.PathEscape(sha)+"/check-runs?per_page=100"), nil, &out, false)
+	if err == nil && out.Total > len(out.Runs) {
+		return nil, ErrTruncated
+	}
+	return out.Runs, err
+}
+
+// WorkflowRun is a GitHub Actions workflow run.
+type WorkflowRun struct {
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	HeadSHA      string `json:"head_sha"`
+	Event        string `json:"event"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	CheckSuiteID int64  `json:"check_suite_id"`
+	RunAttempt   int    `json:"run_attempt"`
+}
+
+// WorkflowRuns lists the GitHub Actions workflow runs for a head sha.
+func (g *GitHub) WorkflowRuns(ctx context.Context, sha string) ([]WorkflowRun, error) {
+	var out struct {
+		Total int           `json:"total_count"`
+		Runs  []WorkflowRun `json:"workflow_runs"`
+	}
+	err := g.c().do(ctx, http.MethodGet, g.repo("/actions/runs?head_sha="+url.QueryEscape(sha)+"&per_page=100"), nil, &out, false)
+	if err == nil && out.Total > len(out.Runs) {
+		return nil, ErrTruncated
+	}
+	return out.Runs, err
+}
+
+// RerunFailedJobs re-runs the failed jobs of a GitHub Actions workflow run
+// (needs the App permission actions: write).
+func (g *GitHub) RerunFailedJobs(ctx context.Context, run int64) error {
+	return g.c().do(ctx, http.MethodPost, g.repo(fmt.Sprintf("/actions/runs/%d/rerun-failed-jobs", run)), nil, nil, true)
+}
+
 // Latest reduces statuses to the newest per context (by time, then id).
 func Latest(statuses []Status) map[string]Status {
 	sorted := append([]Status(nil), statuses...)

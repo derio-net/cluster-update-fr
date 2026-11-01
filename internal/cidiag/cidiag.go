@@ -1,5 +1,7 @@
 // Package cidiag tells WHY a PR has no passing CI signal and performs the
-// matching recovery (R28). Merges happen on GitHub; CI runs on Gitea and its
+// matching recovery (R28). Merges happen on GitHub; where CI comes from is
+// declared per repo (ci_source in update-policy.yaml). For github-checks
+// (frank) see checks.go. For gitea-statuses, CI runs on Gitea and its
 // statuses arrive through a bridge that can drop events, so "no green check"
 // has three different causes needing three different remedies:
 //
@@ -54,6 +56,12 @@ var DefaultRequired = []string{BridgePrefix + "*"}
 // console's own GitHub identities) are considered at all: anyone with
 // statuses:write could otherwise post a green check.
 type Requirement struct {
+	// Source is the repo's declared ci_source (SourceGitHubChecks or
+	// SourceGiteaStatuses); any other value means nothing passes.
+	Source string
+	// Checks are the required GitHub check-run names (github-checks only);
+	// empty means nothing passes.
+	Checks   []string
 	Contexts []string
 	Creators []string
 	// Excluded logins never count, even when listed in Creators (c1d-r12):
@@ -316,7 +324,11 @@ func Recover(ctx context.Context, f Forges, pr forge.PR, d Diagnosis, giteaWeb s
 	return Action{}, ErrNeedsOperator
 }
 
-func rebase(ctx context.Context, f Forges, pr forge.PR) (Action, error) {
+type bodyEditor interface {
+	UpdatePRBody(ctx context.Context, n int, body string) error
+}
+
+func rebase(ctx context.Context, f bodyEditor, pr forge.PR) (Action, error) {
 	body, err := renovate.TickRebase(pr.Body)
 	if err != nil {
 		return Action{}, ErrNeedsOperator

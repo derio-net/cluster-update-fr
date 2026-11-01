@@ -36,8 +36,10 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 | Session credentials | files under `SESSION_SECRET_DIR`: `github-token` (the **session** App's token, not the console's), `omni-sa-key`, `talosconfig`, `hop-talosconfig`, `hop-kubeconfig` (each type gets only its own) |
 | Session PRs | branch `cluster-update/session-<upgrade-id>/<topic>` (`/` cannot occur in an id, so prefixes never collide; the branch names the owning session), author `SESSION_BOT_LOGIN`; merged only by the console on the operator's click |
 | Revert PRs | branch `cluster-update/revert-<reverted PR>-<time>`, author `CONSOLE_BOT_LOGIN`; files restored to the merge's parent only if unchanged since the merge (else revert by hand); merged only by the console on the operator's click |
-| Required CI | `required_ci_contexts:` in frank's `update-policy.yaml` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` only — never by `CONSOLE_BOT_LOGIN`, even if listed; unset = nothing passes |
-| Merge approval | before every console merge (auto-merge, batch, session PR, revert) the console posts commit status `cluster-update/approved` = `success` on the exact verified head SHA — only after every check passed — then merges pinned to that SHA; frank's `main` ruleset requires it from the console App. A PR that failed any check never gets it |
+| CI source | `ci_source:` in frank's `update-policy.yaml`: `github-checks` (frank: GitHub Actions on GitHub-hosted runners, not mirrored) or `gitea-statuses` (bridged Gitea statuses); unset or anything else = nothing passes |
+| Required CI (`github-checks`) | `required_ci_checks:` — check-run names that must ALL be `completed`/`success` on the exact head SHA, created by the GitHub Actions app (`app.slug == github-actions`); `neutral`/`skipped` is not a pass; empty = nothing passes. Console App permissions: `checks: read`, `actions: read` (workflow runs) and `actions: write` (`rerun-failed-jobs`, the one retry) |
+| Required CI (`gitea-statuses`) | `required_ci_contexts:` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` only — never by `CONSOLE_BOT_LOGIN`, even if listed; unset = nothing passes |
+| Merge approval | before every console merge (auto-merge, batch, session PR, revert) the console re-reads the required CI of the declared `ci_source` on the exact verified head SHA and posts commit status `cluster-update/approved` = `success` on it — only after every check, CI included, passed — then merges pinned to that SHA; frank's `main` ruleset requires it from the console App. A PR that failed any check never gets it |
 | Briefs | read from frank: `docs/upgrade-briefs/<type>.md`, `docs/upgrade-briefs/AGENTS.md` |
 | Hop scan results | VictoriaLogs lines `hop-scan result {"image","namespace","vulnerabilities":[{"id","severity","pkg","installed","fixed","title"}]}` |
 | Omni version | JSON file (`OMNI_STATUS_FILE`) `{"version": "..."}` or `omnictl get sysversion -o json` output, written by a Reader-SA sidecar |
@@ -82,7 +84,7 @@ Every credential is optional; a missing one disables only what needs it.
 | Env | Purpose |
 |---|---|
 | `GITHUB_TOKEN_FILE` / `GITHUB_TOKEN` | console GitHub App installation token (re-read on use) |
-| `GITEA_URL`, `GITEA_REPO`, `GITEA_TOKEN_FILE` | Gitea mirror for CI diagnosis |
+| `GITEA_URL`, `GITEA_REPO`, `GITEA_TOKEN_FILE` | Gitea mirror for CI diagnosis (`ci_source: gitea-statuses` only) |
 | `RENOVATE_BOT_LOGIN`, `CONSOLE_BOT_LOGIN`, `SESSION_BOT_LOGIN`, `TRUSTED_COMMITTERS` (default `web-flow`) | PR trust: only PRs by these bots are acted on (unset = none) |
 | `STATUS_CREATOR_LOGINS` | GitHub login(s) of the Gitea→GitHub status bridge; only their statuses count as CI (the console's own never do) — unset = nothing passes |
 | `FRANK_REF` (`main`) | the only base branch an update PR may target |
@@ -117,7 +119,15 @@ Every credential is optional; a missing one disables only what needs it.
   the operator clicks (chosen over narrowing the scope). Every merge
   re-verifies and is pinned to the verified head SHA (batch members are
   merged into the batch branch by SHA too).
-- **CI signal**: every declared required context must be `success` (a Gitea
+- **CI signal (`github-checks`)**: every `required_ci_checks` name needs a
+  check-run on the exact head SHA from the GitHub Actions app, completed with
+  `success`; a check-run from any other app or on an older SHA never counts.
+  A held item is diagnosed: *never ran* (no workflow run for the head;
+  `mergeable` checked first) → Renovate's rebase checkbox; *ran and failed*
+  → GitHub `rerun-failed-jobs` for that run (one retry, then `failed — CI`);
+  *ran, result missing* (runs concluded, a required check-run absent,
+  queued, neutral or skipped) → needs the operator.
+- **CI signal (`gitea-statuses`)**: every declared required context must be `success` (a Gitea
   skipped/warning forwarded as success does not count), posted by the bridge;
   statuses created by the console's own bot never count, so the console
   cannot satisfy its own CI gate (c1d-r12). After the one retry only newer

@@ -78,7 +78,7 @@ func (a *App) ApproveBatch(ctx context.Context, ids []string, by string) (engine
 
 // RetryCI diagnoses a held item and performs its one recovery.
 func (a *App) RetryCI(ctx context.Context, id, by string) error {
-	if a.Diag == nil {
+	if a.Diag == nil && a.GitHub == nil {
 		return ErrUnavailable
 	}
 	err := a.eng(a.policy()).RetryCI(ctx, a.items(), id, by)

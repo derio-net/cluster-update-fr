@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,12 @@ type GitHubAPI interface {
 	DeleteBranch(ctx context.Context, branch string) error
 	LastPush(ctx context.Context, branch string) (forge.Push, error)
 	CreateStatus(ctx context.Context, sha string, s forge.Status) error
+	// GitHub Actions CI (ci_source: github-checks): read check-runs and
+	// workflow runs, re-run failed jobs, tick Renovate's rebase box.
+	CheckRuns(ctx context.Context, sha string) ([]forge.CheckRun, error)
+	WorkflowRuns(ctx context.Context, sha string) ([]forge.WorkflowRun, error)
+	RerunFailedJobs(ctx context.Context, run int64) error
+	UpdatePRBody(ctx context.Context, n int, body string) error
 }
 
 // guardedForge routes every merge through the trust guard (re-verify, pin
@@ -181,14 +188,39 @@ func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 				return gh.CreateStatus(ctx, sha, forge.Status{Context: trust.ApprovedContext, State: "success",
 					Description: "verified by cluster-update-fr at this SHA"})
 			}
+			// The approval is CI-gated too (p4-r2): the required CI of the
+			// repo's declared ci_source must pass on exactly this head, read
+			// again at merge time; anything else is no approval and no merge.
+			a.guard.CIPassed = func(ctx context.Context, pr forge.PR) error {
+				v, why := a.evaluateCI(ctx, pr, a.ciRequirement(a.enginePolicy()), pr.CreatedAt, a.now(), newCICache())
+				if v != cidiag.Passed {
+					return fmt.Errorf("required CI has not passed on %.8s: %s", pr.HeadSHA, why)
+				}
+				return nil
+			}
 			f = guardedForge{GitHubAPI: a.GitHub, guard: a.guard}
 		}
 		a.engine = &engine.Engine{Forge: f, Ledger: a.Store, Now: a.now}
-		if a.Diag != nil {
+		if a.Diag != nil || a.GitHub != nil {
 			web := a.Cfg.GiteaURL
-			a.engine.Diagnose = func(ctx context.Context, pr forge.PR) cidiag.Diagnosis { return cidiag.Diagnose(ctx, a.Diag, pr, web) }
+			a.engine.Diagnose = func(ctx context.Context, pr forge.PR) cidiag.Diagnosis {
+				req := a.ciRequirement(a.enginePolicy())
+				switch {
+				case req.Source == cidiag.SourceGitHubChecks && a.GitHub != nil:
+					return cidiag.DiagnoseChecks(ctx, a.GitHub, pr, req)
+				case req.Source == cidiag.SourceGiteaStatuses && a.Diag != nil:
+					return cidiag.Diagnose(ctx, a.Diag, pr, web)
+				}
+				return cidiag.Diagnosis{Cause: cidiag.Unknown, Detail: "no CI recovery for ci_source " + strconv.Quote(req.Source)}
+			}
 			a.engine.Act = func(ctx context.Context, pr forge.PR, d cidiag.Diagnosis) (cidiag.Action, error) {
-				return cidiag.Recover(ctx, a.Diag, pr, d, web)
+				switch src := a.enginePolicy().CISource; {
+				case src == cidiag.SourceGitHubChecks && a.GitHub != nil:
+					return cidiag.RecoverChecks(ctx, a.GitHub, pr, d)
+				case src == cidiag.SourceGiteaStatuses && a.Diag != nil:
+					return cidiag.Recover(ctx, a.Diag, pr, d, web)
+				}
+				return cidiag.Action{}, cidiag.ErrNeedsOperator
 			}
 		}
 	})
@@ -237,11 +269,62 @@ func (a *App) headPushedAt(ctx context.Context, p forge.PR, cache map[string]tim
 // console must never satisfy its own CI gate (its re-forwards are only a
 // visible copy for the PR page).
 func (a *App) ciRequirement(p frankrepo.Policy) cidiag.Requirement {
-	req := cidiag.Requirement{Contexts: p.RequiredCIContexts, Creators: append([]string(nil), a.Cfg.StatusCreators...)}
+	req := cidiag.Requirement{Source: p.CISource, Checks: append([]string(nil), p.RequiredCIChecks...),
+		Contexts: p.RequiredCIContexts, Creators: append([]string(nil), a.Cfg.StatusCreators...)}
 	if a.Cfg.ConsoleBot != "" {
 		req.Excluded = []string{a.Cfg.ConsoleBot}
 	}
 	return req
+}
+
+// enginePolicy is the policy of the current engine call (set by eng).
+func (a *App) enginePolicy() frankrepo.Policy {
+	if a.engine == nil {
+		return frankrepo.Policy{}
+	}
+	return a.engine.Policy
+}
+
+type ciCache struct {
+	statuses map[string][]forge.Status
+	checks   map[string][]forge.CheckRun
+}
+
+func newCICache() *ciCache {
+	return &ciCache{statuses: map[string][]forge.Status{}, checks: map[string][]forge.CheckRun{}}
+}
+
+// evaluateCI is the CI verdict for PR p's head under req, by the repo's
+// declared ci_source (p4-r2): github-checks reads GitHub Actions check-runs,
+// gitea-statuses reads the bridged commit statuses. An unknown or unset
+// source, or an unreadable forge, never passes.
+func (a *App) evaluateCI(ctx context.Context, p forge.PR, req cidiag.Requirement, headAt, now time.Time, c *ciCache) (cidiag.Verdict, string) {
+	if !cidiag.KnownSource(req.Source) {
+		return cidiag.Pending, "ci_source " + strconv.Quote(req.Source) + " is not github-checks or gitea-statuses: nothing passes"
+	}
+	if a.GitHub == nil {
+		return cidiag.Pending, "GitHub unavailable: CI unknown"
+	}
+	st, ok := c.statuses[p.HeadSHA]
+	if !ok {
+		var err error
+		if st, err = a.GitHub.Statuses(ctx, p.HeadSHA); err != nil {
+			return cidiag.Pending, "statuses unreadable"
+		}
+		c.statuses[p.HeadSHA] = st
+	}
+	if req.Source == cidiag.SourceGiteaStatuses {
+		return cidiag.Evaluate(st, headAt, now, a.Cfg.CITimeout, req)
+	}
+	runs, ok := c.checks[p.HeadSHA]
+	if !ok {
+		var err error
+		if runs, err = a.GitHub.CheckRuns(ctx, p.HeadSHA); err != nil {
+			return cidiag.Pending, "check-runs unreadable"
+		}
+		c.checks[p.HeadSHA] = runs
+	}
+	return cidiag.EvaluateChecks(runs, st, p.HeadSHA, headAt, now, a.Cfg.CITimeout, req)
 }
 
 // trusted keeps the items whose PR passes every trust condition, lists the
@@ -445,7 +528,7 @@ func (a *App) Cycle(ctx context.Context) View {
 		return t, why
 	}
 
-	statuses := map[string][]forge.Status{}
+	ci := newCICache()
 	pushes := map[string]time.Time{}
 	verdict := func(p forge.PR) (cidiag.Verdict, string) {
 		// Without the policy, the required CI contexts are unknown: CI
@@ -453,20 +536,13 @@ func (a *App) Cycle(ctx context.Context) View {
 		if !v.declOK || decl.Errors[frankrepo.PolicyPath] != "" {
 			return cidiag.Pending, "update policy unreadable: required CI unknown, nothing merges"
 		}
-		st, ok := statuses[p.HeadSHA]
-		if !ok && a.GitHub != nil {
-			if st, err = a.GitHub.Statuses(ctx, p.HeadSHA); err != nil {
-				return cidiag.Pending, "statuses unreadable"
-			}
-			statuses[p.HeadSHA] = st
-		}
 		req := a.ciRequirement(decl.Policy)
 		id := engine.ItemID(p.Number)
 		if strings.HasPrefix(p.HeadRef, engine.BatchBranchPrefix) {
 			id = engine.BatchID(p.Number)
 		}
 		req.Since = a.Store.RetriedAt(id) // after a retry, only newer results count
-		return cidiag.Evaluate(st, a.headPushedAt(ctx, p, pushes), now, a.Cfg.CITimeout, req)
+		return a.evaluateCI(ctx, p, req, a.headPushedAt(ctx, p, pushes), now, ci)
 	}
 	trustCache := map[string]error{}
 	items, untrusted := a.trusted(ctx, e.Build(prs, verdict), trustCache)

@@ -418,15 +418,33 @@ func TestGuardedMergeRechecks(t *testing.T) {
 		order = append(order, "approve")
 		return nil
 	}}
+	var ciErr error
+	g.CIPassed = func(_ context.Context, p forge.PR) error {
+		order = append(order, "ci@"+p.HeadSHA)
+		return ciErr
+	}
 	g.SetScopes(map[int]Scope{7: ScopeFor(homepage())})
 	if _, err := g.MergePR(ctx, 7, "head"); err != nil || len(merged) != 1 || merged[0] != "head" {
 		t.Fatalf("merge: %v %v", err, merged)
 	}
 	// frank's ruleset: cluster-update/approved on the exact merged SHA,
-	// posted after every check and before the merge.
-	if len(approved) != 1 || approved[0] != "head" || strings.Join(order, ",") != "approve,merge" {
+	// posted after every check (CI included, on that head) and before the merge.
+	if len(approved) != 1 || approved[0] != "head" || strings.Join(order, ",") != "ci@head,approve,merge" {
 		t.Fatalf("approved %v, order %v", approved, order)
 	}
+	// p4-r2: required CI not passed on the head: no approval, no merge.
+	ciErr = errors.New("required check go failure")
+	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(approved) != 1 || len(merged) != 1 {
+		t.Fatalf("approved/merged with failing CI: %v %v %v", err, approved, merged)
+	}
+	ciErr = nil
+	// No CI gate wired: fail closed.
+	gate := g.CIPassed
+	g.CIPassed = nil
+	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(approved) != 1 || len(merged) != 1 {
+		t.Fatalf("approved/merged with no CI gate: %v %v %v", err, approved, merged)
+	}
+	g.CIPassed = gate
 	// An untrusted commit on the same head name: no approval, no merge.
 	a.commits[7] = append(a.commits[7], signed("head", "mallory", "mallory"))
 	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(approved) != 1 || len(merged) != 1 {

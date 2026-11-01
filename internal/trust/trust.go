@@ -499,6 +499,10 @@ type Guard struct {
 	// after every merge-time check passed, on the exact verified head, right
 	// before the pinned merge; a nil Approve or a failed post is no merge.
 	Approve func(ctx context.Context, sha string) error
+	// CIPassed returns nil only if the repo's required CI passed on the
+	// re-fetched PR's exact head. It runs after the trust checks and before
+	// Approve; a nil CIPassed or any error is no approval and no merge.
+	CIPassed func(ctx context.Context, pr forge.PR) error
 
 	mu     sync.Mutex
 	scopes map[int]Scope
@@ -537,6 +541,12 @@ func (g *Guard) MergeWithScope(ctx context.Context, n int, sha string, scope Sco
 		return "", fmt.Errorf("trust: head moved since verification (%.8s → %.8s)", sha, pr.HeadSHA)
 	}
 	if err := g.Cfg.Check(ctx, g.API, pr, scope); err != nil {
+		return "", fmt.Errorf("trust: %w", err)
+	}
+	if g.CIPassed == nil {
+		return "", errors.New("trust: no CI gate configured; refusing to merge")
+	}
+	if err := g.CIPassed(ctx, pr); err != nil {
 		return "", fmt.Errorf("trust: %w", err)
 	}
 	if g.Approve == nil {

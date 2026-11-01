@@ -82,6 +82,38 @@ type fakeGitHub struct {
 	// console posted cluster-update/approved=success on.
 	mergedSHAs []string
 	approved   []string
+	// GitHub Actions (ci_source: github-checks): check-runs and workflow
+	// runs per head SHA; reruns records rerun-failed-jobs calls.
+	checkRuns map[string][]forge.CheckRun
+	wfRuns    map[string][]forge.WorkflowRun
+	reruns    []int64
+	bodies    map[int]string
+}
+
+func (g *fakeGitHub) CheckRuns(_ context.Context, sha string) ([]forge.CheckRun, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.checkRuns[sha], nil
+}
+func (g *fakeGitHub) WorkflowRuns(_ context.Context, sha string) ([]forge.WorkflowRun, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.wfRuns[sha], nil
+}
+func (g *fakeGitHub) RerunFailedJobs(_ context.Context, run int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reruns = append(g.reruns, run)
+	return nil
+}
+func (g *fakeGitHub) UpdatePRBody(_ context.Context, n int, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.bodies == nil {
+		g.bodies = map[int]string{}
+	}
+	g.bodies[n] = body
+	return nil
 }
 
 func (g *fakeGitHub) HasOpenPR(_ context.Context, branch string) (bool, error) {

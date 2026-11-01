@@ -126,6 +126,14 @@ type Policy struct {
 	// green before anything merges (exact names, or "prefix*"); empty =
 	// every gitea-actions/* context (c1s-r3).
 	RequiredCIContexts []string `yaml:"required_ci_contexts"`
+	// CISource is where this repo's CI signal comes from (p4-r2):
+	// "github-checks" (GitHub Actions check-runs; frank) or
+	// "gitea-statuses" (bridged Gitea statuses, RequiredCIContexts). Unset
+	// or anything else: nothing passes CI.
+	CISource string `yaml:"ci_source"`
+	// RequiredCIChecks are the GitHub check-run names that must ALL succeed
+	// on the head SHA (github-checks); empty = nothing passes.
+	RequiredCIChecks []string `yaml:"required_ci_checks"`
 }
 
 // Dep identifies a dependency for policy resolution.

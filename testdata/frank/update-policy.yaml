@@ -2,8 +2,14 @@
 version: 1
 merge_window: 24h
 minimum_release_age: 72h
-# Every one of these must be green, posted by the status bridge or the
-# console, before anything merges (c1s-r3).
+# Where CI comes from (p4-r2): github-checks (required_ci_checks) or
+# gitea-statuses (required_ci_contexts). This fixture exercises the Gitea
+# path; the app tests swap in github-checks.
+ci_source: gitea-statuses
+required_ci_checks:
+  - "go"
+# Every one of these must be green, posted by the status bridge, before
+# anything merges (c1s-r3).
 required_ci_contexts:
   - "gitea-actions/ci / go"
 defaults:
