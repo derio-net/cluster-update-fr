@@ -17,6 +17,8 @@ package cidiag
 import (
 	"context"
 	"errors"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,29 +42,86 @@ const (
 	Missing Verdict = "missing" // no conclusive signal within the timeout
 )
 
+// DefaultRequired is used when update-policy.yaml declares no
+// required_ci_contexts: at least one bridge context, all of them green.
+var DefaultRequired = []string{BridgePrefix + "*"}
+
+// Requirement is what "CI passed" means (c1s-r3): every entry of Contexts
+// (an exact context, or a "prefix*" pattern) must be matched by at least one
+// status, every matched status must be "success" — a Gitea skipped/warning
+// forwarded as success (description "Gitea: skipped") does NOT count — and
+// only statuses CREATED by one of Creators (the status bridge's and the
+// console's own GitHub identities) are considered at all: anyone with
+// statuses:write could otherwise post a green check.
+type Requirement struct {
+	Contexts []string
+	Creators []string
+}
+
+var notReallySuccess = regexp.MustCompile(`(?i)\b(skipped|warning)\b`)
+
+func (r Requirement) matches(pattern, ctx string) bool {
+	if p, ok := strings.CutSuffix(pattern, "*"); ok {
+		return strings.HasPrefix(ctx, p)
+	}
+	return ctx == pattern
+}
+
 // Evaluate reads the GitHub statuses of a PR head pushed at headAt.
-func Evaluate(statuses []forge.Status, headAt, now time.Time, timeout time.Duration) (Verdict, string) {
-	latest := forge.Latest(statuses)
-	var ci []forge.Status
-	for c, s := range latest {
-		if strings.HasPrefix(c, BridgePrefix) {
-			ci = append(ci, s)
+func Evaluate(statuses []forge.Status, headAt, now time.Time, timeout time.Duration, req Requirement) (Verdict, string) {
+	late := now.Sub(headAt) > timeout
+	wait := func(detail string) (Verdict, string) {
+		if late {
+			return Missing, detail + " after " + timeout.String()
+		}
+		return Pending, detail
+	}
+	if len(req.Creators) == 0 {
+		return wait("no trusted status creator configured (STATUS_CREATOR_LOGINS)")
+	}
+	creators := map[string]bool{}
+	for _, c := range req.Creators {
+		creators[c] = true
+	}
+	var trusted []forge.Status
+	for _, s := range statuses {
+		if creators[s.Creator.Login] {
+			trusted = append(trusted, s)
 		}
 	}
-	late := now.Sub(headAt) > timeout
-	if len(ci) == 0 {
-		if late {
-			return Missing, "no CI status after " + timeout.String()
-		}
-		return Pending, "waiting for CI"
+	latest := forge.Latest(trusted)
+	contexts := make([]string, 0, len(latest))
+	for c := range latest {
+		contexts = append(contexts, c)
+	}
+	sort.Strings(contexts)
+	required := req.Contexts
+	if len(required) == 0 {
+		required = DefaultRequired
 	}
 	pending := false
-	for _, s := range ci {
-		switch s.State {
-		case "failure", "error":
-			return Failed, s.Context + " " + s.State
-		case "pending":
-			pending = true
+	for _, want := range required {
+		matched := 0
+		for _, c := range contexts {
+			if !req.matches(want, c) {
+				continue
+			}
+			matched++
+			s := latest[c]
+			switch {
+			case s.State == "failure" || s.State == "error":
+				return Failed, s.Context + " " + s.State
+			case s.State == "pending":
+				pending = true
+			case s.State == "success" && notReallySuccess.MatchString(s.Description):
+				// terminal and not a pass: no conclusive signal
+				return Missing, "required " + s.Context + " was " + strings.ToLower(notReallySuccess.FindString(s.Description)) + ", not passed"
+			case s.State != "success":
+				return Failed, s.Context + " " + s.State
+			}
+		}
+		if matched == 0 {
+			return wait("required CI context " + want + " has not reported")
 		}
 	}
 	if pending {

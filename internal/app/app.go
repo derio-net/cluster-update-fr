@@ -179,6 +179,17 @@ func (a *App) trustConfig() trust.Config {
 		BaseBranch: a.Cfg.FrankRef}
 }
 
+// ciRequirement: the contexts frank's update-policy.yaml declares as
+// required (default: every bridge context), posted only by the status
+// bridge (STATUS_CREATOR_LOGINS) or the console itself (re-forwards).
+func (a *App) ciRequirement(p frankrepo.Policy) cidiag.Requirement {
+	creators := append([]string(nil), a.Cfg.StatusCreators...)
+	if a.Cfg.ConsoleBot != "" {
+		creators = append(creators, a.Cfg.ConsoleBot)
+	}
+	return cidiag.Requirement{Contexts: p.RequiredCIContexts, Creators: creators}
+}
+
 // trusted keeps the items whose PR passes every trust condition, lists the
 // rest as untrusted, and hands the verified scopes to the merge guard.
 func (a *App) trusted(ctx context.Context, items []engine.Item, cache map[string]error) ([]engine.Item, []UntrustedPR) {
@@ -343,7 +354,7 @@ func (a *App) Cycle(ctx context.Context) View {
 			}
 			statuses[p.HeadSHA] = st
 		}
-		return cidiag.Evaluate(st, p.UpdatedAt, now, a.Cfg.CITimeout)
+		return cidiag.Evaluate(st, p.UpdatedAt, now, a.Cfg.CITimeout, a.ciRequirement(decl.Policy))
 	}
 	trustCache := map[string]error{}
 	items, untrusted := a.trusted(ctx, e.Build(prs, verdict), trustCache)

@@ -154,6 +154,11 @@ type Status struct {
 	Description string    `json:"description"`
 	TargetURL   string    `json:"target_url"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Creator is the GitHub account that posted the status (c1s-r3: only the
+	// status bridge's and the console's statuses count as CI).
+	Creator struct {
+		Login string `json:"login"`
+	} `json:"creator"`
 }
 
 // Statuses lists every status of a commit (newest first, as GitHub returns).

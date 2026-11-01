@@ -129,7 +129,9 @@ func (g *fakeGitHub) PR(_ context.Context, n int) (forge.PR, error) {
 	return forge.PR{Number: n}, nil
 }
 func (g *fakeGitHub) Statuses(context.Context, string) ([]forge.Status, error) {
-	return []forge.Status{{Context: "gitea-actions/ci / go", State: "success", CreatedAt: t0}}, nil
+	s := forge.Status{Context: "gitea-actions/ci / go", State: "success", CreatedAt: t0}
+	s.Creator.Login = "status-bridge[bot]"
+	return []forge.Status{s}, nil
 }
 func (g *fakeGitHub) Releases(_ context.Context, repo string) ([]string, error) {
 	switch repo {
@@ -215,7 +217,8 @@ const prBody = "| Package | Change |\n|---|---|\n| [%s](x) | `%s` -> `%s` |\n\n 
 func newApp(t *testing.T, now *time.Time, hop bool) (*App, *fakeGitHub, *fakeSender, *memKube) {
 	t.Helper()
 	cfg, _ := config.Load(func(k string) string {
-		return map[string]string{"SESSION_IMAGE": "ghcr.io/derio-net/upgrade-session:1.0.0", "RENOVATE_BOT_LOGIN": renovateBot, "CONSOLE_BOT_LOGIN": "cluster-update-fr[bot]"}[k]
+		return map[string]string{"SESSION_IMAGE": "ghcr.io/derio-net/upgrade-session:1.0.0", "RENOVATE_BOT_LOGIN": renovateBot, "CONSOLE_BOT_LOGIN": "cluster-update-fr[bot]",
+			"STATUS_CREATOR_LOGINS": "status-bridge[bot]"}[k]
 	})
 	st, err := store.Open(t.TempDir(), func() time.Time { return *now })
 	if err != nil {

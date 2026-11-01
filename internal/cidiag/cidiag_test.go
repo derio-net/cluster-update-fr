@@ -11,8 +11,46 @@ import (
 
 var t0 = time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
 
+const bridge = "status-bridge[bot]"
+
 func st(ctx, state string, at time.Time) forge.Status {
-	return forge.Status{Context: ctx, State: state, CreatedAt: at}
+	s := forge.Status{Context: ctx, State: state, CreatedAt: at}
+	s.Creator.Login = bridge
+	return s
+}
+
+var anyBridge = Requirement{Creators: []string{bridge}}
+
+// c1s-r3: a declared set of required contexts, each green, each posted by a
+// trusted creator; skipped/warning forwarded as success is not a pass.
+func TestEvaluateRequiredContexts(t *testing.T) {
+	timeout := 30 * time.Minute
+	req := Requirement{Contexts: []string{"gitea-actions/ci / go (push)", "gitea-actions/ci / image (push)"}, Creators: []string{bridge, "cluster-update-fr[bot]"}}
+	forged := st("gitea-actions/ci / image (push)", "success", t0)
+	forged.Creator.Login = "mallory"
+	skipped := st("gitea-actions/ci / image (push)", "success", t0)
+	skipped.Description = "Gitea: skipped"
+	reforwarded := st("gitea-actions/ci / image (push)", "success", t0)
+	reforwarded.Creator.Login = "cluster-update-fr[bot]"
+	cases := []struct {
+		name     string
+		statuses []forge.Status
+		want     Verdict
+	}{
+		{"any one green context is not enough", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0)}, Pending},
+		{"both required green", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), st("gitea-actions/ci / image (push)", "success", t0)}, Passed},
+		{"a required context posted by an untrusted account does not count", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), forged}, Pending},
+		{"skipped is not success", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), skipped}, Missing},
+		{"the console's own re-forward counts", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), reforwarded}, Passed},
+	}
+	for _, c := range cases {
+		if v, d := Evaluate(c.statuses, t0, t0.Add(time.Minute), timeout, req); v != c.want {
+			t.Errorf("%s: got %s (%s), want %s", c.name, v, d, c.want)
+		}
+	}
+	if v, _ := Evaluate([]forge.Status{st("gitea-actions/ci / go", "success", t0)}, t0, t0.Add(time.Minute), timeout, Requirement{}); v == Passed {
+		t.Error("with no trusted creator configured nothing may pass")
+	}
 }
 
 func TestEvaluate(t *testing.T) {
@@ -34,7 +72,7 @@ func TestEvaluate(t *testing.T) {
 		{"release age gate pending", []forge.Status{st("gitea-actions/ci / go", "success", t0), st("renovate/stability-days", "pending", t0)}, t0.Add(time.Hour), Waiting},
 	}
 	for _, c := range cases {
-		v, _ := Evaluate(c.statuses, t0, c.now, timeout)
+		v, _ := Evaluate(c.statuses, t0, c.now, timeout, anyBridge)
 		if v != c.want {
 			t.Errorf("%s: got %s, want %s", c.name, v, c.want)
 		}

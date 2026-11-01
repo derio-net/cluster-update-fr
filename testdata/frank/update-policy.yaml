@@ -2,6 +2,10 @@
 version: 1
 merge_window: 24h
 minimum_release_age: 72h
+# Every one of these must be green, posted by the status bridge or the
+# console, before anything merges (c1s-r3).
+required_ci_contexts:
+  - "gitea-actions/ci / go"
 defaults:
   patch: auto-merge
   minor: batch-approve

@@ -122,6 +122,10 @@ type Policy struct {
 	ReleaseAgeRaw     string            `yaml:"minimum_release_age"`
 	MergeWindow       time.Duration     `yaml:"-"`
 	MinimumReleaseAge time.Duration     `yaml:"-"`
+	// RequiredCIContexts are the GitHub status contexts that must ALL be
+	// green before anything merges (exact names, or "prefix*"); empty =
+	// every gitea-actions/* context (c1s-r3).
+	RequiredCIContexts []string `yaml:"required_ci_contexts"`
 }
 
 // Dep identifies a dependency for policy resolution.
