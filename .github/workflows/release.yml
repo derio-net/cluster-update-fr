@@ -14,6 +14,9 @@ permissions:
 
 jobs:
   image:
+    # Gitea Actions reads .github/workflows/ too; publishing to GHCR is a
+    # GitHub-only job, so the mirror must never run it.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
