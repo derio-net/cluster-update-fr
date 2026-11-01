@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -86,6 +88,7 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 	// Never between a Start's write-ahead record and its pod create.
 	l.startMu.Lock()
 	defer l.startMu.Unlock()
+	l.RegisterCredentials() // every cycle: rotated credentials are redacted too
 	now := l.now()
 	var ended []Ended
 	for _, r := range l.records() {
@@ -152,6 +155,31 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 		}
 	}
 	return ended
+}
+
+// RegisterCredentials adds every file under CredDir (whatever its name, so a
+// credential frank adds later is covered too) to the GLOBAL redaction set
+// (c1s-r5): console logs, pages, Telegram and error texts never show one,
+// even with no session running. Called at startup and on every Tick, so a
+// rotated value is registered within one cycle. Old values stay registered.
+func (l *Launcher) RegisterCredentials() {
+	if l.CredDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(l.CredDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		p := filepath.Join(l.CredDir, e.Name())
+		st, err := os.Stat(p) // follows the ..data symlinks of a mounted Secret
+		if err != nil || !st.Mode().IsRegular() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+			scrub.Register("session-"+e.Name(), string(b))
+		}
+	}
 }
 
 func (l *Launcher) endFor(ctx context.Context, r Record, outcome string) Ended {

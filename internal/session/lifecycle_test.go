@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/derio-net/cluster-update-fr/internal/kube"
+	"github.com/derio-net/cluster-update-fr/internal/scrub"
 	"github.com/derio-net/cluster-update-fr/internal/store"
 )
 
@@ -202,6 +205,33 @@ func TestEphemeralContainerEndsTheSession(t *testing.T) {
 	}
 	if _, ok := k.objects["secrets/"+SecretName("pr-5")]; ok {
 		t.Error("credentials survived")
+	}
+}
+
+// c1s-r5: every credential under SESSION_SECRET_DIR is in the GLOBAL
+// redaction set from startup (before any session exists, so console logs
+// and pages never show one) and again after it rotates.
+func TestSessionCredentialsAreRegisteredGlobally(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := launcher(t, newFake(), &now)
+	omni := "omni-" + strings.Repeat("Gq7", 8) // unique to this test
+	if err := os.WriteFile(filepath.Join(l.CredDir, "omni-sa-key"), []byte(omni), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := scrub.String("log: " + omni); !strings.Contains(out, "Gq7Gq7") {
+		t.Fatal("precondition: the value must not be registered yet")
+	}
+	l.RegisterCredentials()
+	if out := scrub.String("log: " + omni); strings.Contains(out, "Gq7Gq7") {
+		t.Fatalf("omni key not redacted globally: %q", out)
+	}
+	rotated := "omni-" + strings.Repeat("Rt9", 8)
+	if err := os.WriteFile(filepath.Join(l.CredDir, "omni-sa-key"), []byte(rotated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l.Tick(context.Background()) // every cycle re-reads the directory
+	if out := scrub.String("log: " + rotated); strings.Contains(out, "Rt9Rt9") {
+		t.Fatalf("rotated key not redacted: %q", out)
 	}
 }
 

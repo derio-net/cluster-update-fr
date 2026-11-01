@@ -69,6 +69,7 @@ func main() {
 		a.Launcher = &session.Launcher{Kube: frank, Store: st, Namespace: cfg.SessionNamespace, Image: cfg.SessionImage,
 			CredDir: cfg.SessionSecretDir, ConsoleURL: cfg.SessionAPIURL, IdleTimeout: cfg.IdleTimeout, MaxLifetime: cfg.MaxLifetime,
 			HardCeiling: cfg.HardCeiling, StepCap: cfg.StepCap, StepTotalCap: cfg.StepTotalCap, MaxStepStarts: cfg.MaxStepStarts}
+		a.Launcher.RegisterCredentials() // before any listener serves a byte (c1s-r5)
 	}
 	if cfg.HopKubeconfig != "" {
 		if hop, err := kube.FromKubeconfig(cfg.HopKubeconfig); err != nil {
