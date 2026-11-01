@@ -344,6 +344,30 @@ func TestStartSessionTwiceAttaches(t *testing.T) {
 	}
 }
 
+type noVulnGetter struct{ fixtureGetter }
+
+func (g noVulnGetter) Get(ctx context.Context, path string, out any) error {
+	if strings.Contains(path, "vulnerabilityreports") {
+		return errors.New("trivy CRD unreadable")
+	}
+	return g.fixtureGetter.Get(ctx, path, out)
+}
+
+// c1c-r14: last_scan means "vulnerability reports were read", not "pods were
+// read" — frank's dead-man rule on it must fire when the scan is blind.
+func TestLastScanAdvancesOnlyOnAVulnRead(t *testing.T) {
+	now := t0
+	a, _, _, _ := newApp(t, &now, false)
+	a.Frank = noVulnGetter{}
+	if v := a.Cycle(context.Background()); !v.LastScan.IsZero() {
+		t.Fatalf("last scan advanced to %v without reading vulnerabilityreports", v.LastScan)
+	}
+	a.Frank = fixtureGetter{}
+	if v := a.Cycle(context.Background()); !v.LastScan.Equal(now) {
+		t.Fatalf("last scan = %v after a good read", v.LastScan)
+	}
+}
+
 // c1c-r19: a routine lifetime warning (max lifetime passed during a step)
 // shows in the console only; #security gets the hard-ceiling alarm.
 func TestLifetimeWarningStaysInTheConsole(t *testing.T) {

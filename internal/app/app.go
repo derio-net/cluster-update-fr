@@ -402,7 +402,9 @@ func (a *App) Cycle(ctx context.Context) View {
 	}
 	rs := reportState{}
 	a.Store.GetBlob(blobReport, &rs)
-	if frank != nil && frank.OK("pods") {
+	// last_scan = the vulnerability reports were READ (c1c-r14); a pod read
+	// says nothing about the scanner, and frank's dead-man rule keys on it.
+	if frank != nil && frank.OK("vulnerabilityreports") {
 		rs.LastScan = now
 	}
 	a.report(ctx, items, &v, &rs)
