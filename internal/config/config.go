@@ -68,6 +68,7 @@ type Config struct {
 	// PR trust (the frank repo is public): only PRs by these bots are acted on.
 	RenovateBot       string   // login of the Renovate GitHub App bot, e.g. "renovate-frank[bot]"
 	ConsoleBot        string   // login of the console's GitHub App bot (batch PRs)
+	SessionBot        string   // login of the upgrade sessions' GitHub App bot (session PRs)
 	TrustedCommitters []string // extra committer logins (GitHub's web-flow for API commits)
 	// StatusCreators are the GitHub logins whose commit statuses count as
 	// CI (the Gitea→GitHub status bridge); the console bot is added too.
@@ -169,6 +170,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.GiteaRepo = get("GITEA_REPO", c.FrankRepo)
 	c.RenovateBot = get("RENOVATE_BOT_LOGIN", "")
 	c.ConsoleBot = get("CONSOLE_BOT_LOGIN", "")
+	c.SessionBot = get("SESSION_BOT_LOGIN", "")
 	c.StatusCreators = strings.Fields(strings.ReplaceAll(get("STATUS_CREATOR_LOGINS", ""), ",", " "))
 	c.TrustedCommitters = strings.Fields(strings.ReplaceAll(get("TRUSTED_COMMITTERS", "web-flow"), ",", " "))
 

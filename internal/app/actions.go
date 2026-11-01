@@ -201,7 +201,9 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 	instructions := a.readRepo(ctx, "docs/upgrade-briefs/AGENTS.md")
 	if instructions == "" {
 		instructions = "Read brief/brief.md first. Report each long step to the console with $CONSOLE_URL/api/sessions/$UPGRADE_ID/step " +
-			"(Authorization: Bearer the session-step-token from $CREDENTIALS_DIR), and finish by running the verification in the brief."
+			"(Authorization: Bearer the session-step-token from $CREDENTIALS_DIR). You may open PRs but NEVER merge one: push to a branch named " +
+			"cluster-update/session-$UPGRADE_ID-<topic> and POST {\"pr\": N} to $CONSOLE_URL/api/sessions/$UPGRADE_ID/request-merge; the operator " +
+			"merges it from the console. Finish by running the verification in the brief."
 	}
 	// Every forge- or cluster-sourced string is untrusted: the one-line title
 	// is neutralised here; multi-line bodies only ever appear fenced, at the
@@ -216,7 +218,15 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 	}
 	fmt.Fprintf(&b, "- **Pinned clients:** talosctl %s, kubectl %s\n", talos, kubectl)
 	fmt.Fprintf(&b, "- **Rollback:** %s\n\n", rollback)
-	b.WriteString("## Verification (R16)\n\nWorkloads: ArgoCD's `status.operationState.operation.sync.revision` must contain the merge commit (Synced alone never counts) and `smoke/<app>.yaml` must pass. OS steps: declare the version in `versions/<cluster>.yaml` FIRST (PR, merged by the console), then apply, then every node on the declared version, all Ready, cluster smoke passing.\n\n")
+	fmt.Fprintf(&b, "## Pull requests: you open them, the operator merges them\n\n"+
+		"You never merge a PR (your token cannot push to `main`). Open each PR from a branch named `%s%s-<topic>`, "+
+		"commits signed and pushed by the session App, changing only files of this update. Then ask the console:\n\n"+
+		"```sh\ncurl -fsS -X POST \"$CONSOLE_URL/api/sessions/$UPGRADE_ID/request-merge\" \\\n"+
+		"  -H \"Authorization: Bearer $(cat \"$CREDENTIALS_DIR/session-step-token\")\" -d '{\"pr\": <number>}'\n```\n\n"+
+		"The console verifies the PR (author, branch, signatures, files) and shows a **Merge session PR** button to the operator; "+
+		"wait for the PR to be merged before you continue. A 422 answer names why the PR was refused — fix the PR, do not work around it.\n\n",
+		engine.SessionBranchPrefix, id)
+	b.WriteString("## Verification (R16)\n\nWorkloads: ArgoCD's `status.operationState.operation.sync.revision` must contain the merge commit (Synced alone never counts) and `smoke/<app>.yaml` must pass. OS steps: declare the version in `versions/<cluster>.yaml` FIRST — a PR on your session branch, request-merge, wait for the operator's merge — then apply, then every node on the declared version, all Ready, cluster smoke passing.\n\n")
 	if template != "" {
 		b.WriteString(template)
 	} else {

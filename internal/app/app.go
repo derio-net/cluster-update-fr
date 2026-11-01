@@ -119,6 +119,7 @@ type View struct {
 	Guided     []GuidedStep
 	Omni       *inventory.Dependency
 	Sessions   []session.Record
+	SessionPRs []SessionPR // session PRs waiting for the operator's merge
 	Alarms     []alarm.Record
 	Updates    []store.Update
 	History    []store.Event
@@ -177,7 +178,7 @@ func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 
 func (a *App) trustConfig() trust.Config {
 	return trust.Config{Repo: a.Cfg.FrankRepo, RenovateBot: a.Cfg.RenovateBot, ConsoleBot: a.Cfg.ConsoleBot, Committers: a.Cfg.TrustedCommitters,
-		BaseBranch: a.Cfg.FrankRef}
+		BaseBranch: a.Cfg.FrankRef, SessionBot: a.Cfg.SessionBot}
 }
 
 // headPushedAt is when the PR's CURRENT head was pushed (the repository
@@ -279,8 +280,12 @@ func (a *App) trusted(ctx context.Context, items []engine.Item, cache map[string
 // View returns the last cycle's view.
 func (a *App) View() View {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.view
+	v := a.view
+	a.mu.RUnlock()
+	if a.Store != nil {
+		v.SessionPRs = a.sessionPRs() // live: a request shows at once
+	}
+	return v
 }
 
 // Cycle runs one full pass. Every source fails alone: what cannot be read

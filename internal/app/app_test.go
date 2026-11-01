@@ -53,6 +53,7 @@ type fakeGitHub struct {
 }
 
 const renovateBot = "renovate-frank[bot]"
+const sessionBot = "frank-upgrade-session[bot]"
 
 func signedCommit(sha, author string) forge.Commit {
 	return forge.Commit{SHA: sha, Author: author, Committer: "web-flow", Verified: true, Reason: "valid",
@@ -234,7 +235,7 @@ func newApp(t *testing.T, now *time.Time, hop bool) (*App, *fakeGitHub, *fakeSen
 	t.Helper()
 	cfg, _ := config.Load(func(k string) string {
 		return map[string]string{"SESSION_IMAGE": "ghcr.io/derio-net/upgrade-session:1.0.0", "RENOVATE_BOT_LOGIN": renovateBot, "CONSOLE_BOT_LOGIN": "cluster-update-fr[bot]",
-			"STATUS_CREATOR_LOGINS": "status-bridge[bot]"}[k]
+			"STATUS_CREATOR_LOGINS": "status-bridge[bot]", "SESSION_BOT_LOGIN": sessionBot}[k]
 	})
 	st, err := store.Open(t.TempDir(), func() time.Time { return *now })
 	if err != nil {
@@ -442,6 +443,86 @@ func TestSessionOutcomesMapToStates(t *testing.T) {
 	a.Cycle(context.Background())
 	if u, _ := a.Store.Get(id); u.State != store.Failed || !strings.Contains(u.Reason, "needs you") {
 		t.Fatalf("pod died: %+v", u)
+	}
+}
+
+// c1c-r1: a session's PR has a merge route — the session asks, the console
+// verifies against THAT session's scope, the operator clicks, the console
+// merges pinned to the verified head and the update becomes merged (and so
+// verifiable as an OS step).
+func TestSessionPRMergeRoute(t *testing.T) {
+	const id = "frank-os-talos-1.13.4"
+	sessPR := func(n int, branch, author string, files []string) (forge.PR, []forge.Commit, []string) {
+		sha := fmt.Sprintf("s%d", n)
+		return forge.PR{Number: n, Title: "versions/frank.yaml: talos 1.13.4", HeadSHA: sha, HeadRef: branch, Author: author, State: "open",
+			HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank", BaseRef: "main", CreatedAt: t0, UpdatedAt: t0}, []forge.Commit{signedCommit(sha, author)}, files
+	}
+	cases := []struct {
+		name          string
+		branch        string
+		author        string
+		files         []string
+		wantTrusted   bool
+		wantRefusalIn string
+	}{
+		{"its own PR", engine.SessionBranchPrefix + id + "-version", sessionBot, []string{"versions/frank.yaml"}, true, ""},
+		{"another session's prefix", engine.SessionBranchPrefix + "hop-os-talos-1.13.4-version", sessionBot, []string{"versions/frank.yaml"}, false, "prefix"},
+		{"not the session bot", engine.SessionBranchPrefix + id + "-version", renovateBot, []string{"versions/frank.yaml"}, false, "author"},
+		{"outside its scope", engine.SessionBranchPrefix + id + "-version", sessionBot, []string{"versions/frank.yaml", "apps/grafana/values.yaml"}, false, "outside"},
+		{"touches the policy", engine.SessionBranchPrefix + id + "-version", sessionBot, []string{"update-policy.yaml"}, false, "sensitive"},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			now := t0
+			a, gh, _, _ := newApp(t, &now, false)
+			a.Cycle(context.Background())
+			if _, _, err := a.StartSession(context.Background(), id, "derio"); err != nil {
+				t.Fatal(err)
+			}
+			n := 60 + i
+			p, commits, files := sessPR(n, c.branch, c.author, c.files)
+			gh.mu.Lock()
+			gh.prs = append(gh.prs, p)
+			if gh.commits == nil {
+				gh.commits = map[int][]forge.Commit{}
+			}
+			if gh.files == nil {
+				gh.files = map[int][]string{}
+			}
+			gh.commits[n], gh.files[n] = commits, files
+			gh.mu.Unlock()
+			tok := a.Launcher.StepToken(id)
+			if err := a.RequestMerge(context.Background(), id, "wrong", n); !errors.Is(err, session.ErrBadToken) {
+				t.Fatalf("wrong token: %v", err)
+			}
+			err := a.RequestMerge(context.Background(), id, tok, n)
+			if c.wantTrusted != (err == nil) {
+				t.Fatalf("request-merge: %v", err)
+			}
+			v := a.View()
+			if len(v.SessionPRs) != 1 || v.SessionPRs[0].PR != n || (v.SessionPRs[0].Untrusted == "") != c.wantTrusted {
+				t.Fatalf("listed = %+v", v.SessionPRs)
+			}
+			if !c.wantTrusted && !strings.Contains(v.SessionPRs[0].Untrusted, c.wantRefusalIn) {
+				t.Errorf("reason %q should mention %q", v.SessionPRs[0].Untrusted, c.wantRefusalIn)
+			}
+			err = a.MergeSessionPR(context.Background(), n, "derio")
+			gh.mu.Lock()
+			merged := len(gh.merged) > 0 && gh.merged[len(gh.merged)-1] == n
+			gh.mu.Unlock()
+			if c.wantTrusted != (err == nil && merged) {
+				t.Fatalf("merge: err=%v merged=%v", err, merged)
+			}
+			if c.wantTrusted {
+				u, _ := a.Store.Get(id)
+				if u.State != store.Merged || u.MergeSHA != fmt.Sprintf("merge-%d", n) || u.PR != n || u.Approver != "derio" {
+					t.Fatalf("update after the merge = %+v", u)
+				}
+				if len(a.View().SessionPRs) != 0 {
+					t.Error("a merged request stays listed")
+				}
+			}
+		})
 	}
 }
 

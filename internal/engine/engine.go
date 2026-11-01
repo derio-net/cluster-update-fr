@@ -28,6 +28,14 @@ const ApproverAuto = "auto"
 // BatchBranchPrefix starts every console-assembled batch branch.
 const BatchBranchPrefix = "cluster-update/batch-"
 
+// SessionBranchPrefix starts every upgrade session's PR branch:
+// cluster-update/session-<upgrade-id>-<anything> (session App bot author).
+const SessionBranchPrefix = "cluster-update/session-"
+
+// RevertBranchPrefix starts every console revert PR branch:
+// cluster-update/revert-<reverted PR>-<anything> (console App bot author).
+const RevertBranchPrefix = "cluster-update/revert-"
+
 // Item states.
 const (
 	StateCountdown = "countdown"     // auto-merge, waiting for MergeAt

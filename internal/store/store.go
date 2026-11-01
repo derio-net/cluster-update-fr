@@ -290,6 +290,34 @@ func (s *Store) Track(u Update) {
 	s.d.Updates[u.ID] = &cp
 }
 
+// MarkMerged records a PR the console merged for an update outside the
+// engine (a session PR): pending/approved/held move to merged; an update
+// already merged (a later step's PR) takes the newer merge commit.
+func (s *Store) MarkMerged(id, sha string, pr int, by, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.d.Updates[id]
+	if !ok {
+		return ErrUnknown
+	}
+	set := func(u *Update) {
+		u.MergeSHA, u.PR = sha, pr
+		if u.Approver == "" {
+			u.Approver = by
+		}
+	}
+	switch u.State {
+	case Pending, Approved, Held:
+		return s.transitionAs(id, Merged, by, reason, set, u.State == Held)
+	case Merged, Applied, Failed:
+		// a later PR of the same session: verification restarts from it
+		return s.transitionAs(id, Merged, by, reason, set, true)
+	}
+	set(u)
+	s.appendEvent(Event{At: s.now(), Update: id, Action: "merged", By: by, PR: pr, SHA: sha, Reason: reason})
+	return nil
+}
+
 // Reopen moves an ABANDONED update back to pending (a new session for an
 // update an earlier session ended without merging). Other states: no-op.
 func (s *Store) Reopen(id, by, reason string) error {

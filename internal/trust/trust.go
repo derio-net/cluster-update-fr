@@ -51,6 +51,7 @@ type Config struct {
 	ConsoleBot  string   // login of the console's GitHub App bot
 	Committers  []string // extra committer logins allowed (e.g. web-flow)
 	BaseBranch  string   // the only base an item's PR may target ("" = main)
+	SessionBot  string   // login of the upgrade sessions' GitHub App bot (session PRs)
 }
 
 func (c Config) base() string {
@@ -78,6 +79,25 @@ type Scope struct {
 	// chart bump lands on the auto-merge and batch paths (c1c-r7).
 	TargetRevisionOnly []string
 	Known              bool // false: the dependency's location is unknown
+	// BranchPrefix, for a session's or a revert's PR, is the one head
+	// branch prefix it may use (cluster-update/session-<id>-, …/revert-<n>-).
+	BranchPrefix string
+}
+
+// SessionScope is where a session's PR may land: its own update's scope on
+// the session path, on its own branch prefix.
+func SessionScope(upgradeID string, it engine.Item) Scope {
+	it.Path = frankrepo.PathSession
+	s := ScopeFor(it)
+	s.BranchPrefix = engine.SessionBranchPrefix + upgradeID + "-"
+	return s
+}
+
+// RevertScope is where a revert PR may land: exactly the files the reverted
+// PR changed, on the console's revert prefix for that PR.
+func RevertScope(revertedPR int, files []string) Scope {
+	return Scope{Prefixes: append([]string(nil), files...), Sensitive: append([]string(nil), files...), Known: len(files) > 0,
+		BranchPrefix: fmt.Sprintf("%s%d-", engine.RevertBranchPrefix, revertedPR)}
 }
 
 var targetRevisionLine = regexp.MustCompile(`^[+-][ \t]*targetRevision:[ \t]*["']?[A-Za-z0-9._+-]+["']?[ \t]*$`)
@@ -188,12 +208,26 @@ func within(path string, allowed []string) bool {
 // Check verifies pr against every condition; nil means trusted.
 func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) error {
 	batch := strings.HasPrefix(pr.HeadRef, engine.BatchBranchPrefix)
+	sess := strings.HasPrefix(pr.HeadRef, engine.SessionBranchPrefix)
+	revert := strings.HasPrefix(pr.HeadRef, engine.RevertBranchPrefix)
 	author := c.RenovateBot
-	if batch {
+	switch {
+	case batch, revert:
 		author = c.ConsoleBot
+	case sess:
+		author = c.SessionBot
 	}
 	if author == "" {
-		return errors.New("trusted bot login not configured (RENOVATE_BOT_LOGIN / CONSOLE_BOT_LOGIN)")
+		return errors.New("trusted bot login not configured (RENOVATE_BOT_LOGIN / CONSOLE_BOT_LOGIN / SESSION_BOT_LOGIN)")
+	}
+	// A session or revert PR is only ever checked against the scope made
+	// for it, which names its exact branch prefix: a session's PR must be
+	// on cluster-update/session-<its own upgrade id>- (c1c-r1).
+	if (sess || revert) && (scope.BranchPrefix == "" || !strings.HasPrefix(pr.HeadRef, scope.BranchPrefix)) {
+		return fmt.Errorf("branch %q is not this session's or revert's own prefix %q", pr.HeadRef, scope.BranchPrefix)
+	}
+	if !sess && !revert && scope.BranchPrefix != "" {
+		return fmt.Errorf("branch %q is not on %s", pr.HeadRef, scope.BranchPrefix)
 	}
 	// (a)
 	if pr.Author != author {
@@ -206,7 +240,7 @@ func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) er
 	if pr.BaseRef != c.base() {
 		return fmt.Errorf("base branch %q is not %s", pr.BaseRef, c.base())
 	}
-	if !batch && !strings.HasPrefix(pr.HeadRef, "renovate/") {
+	if !batch && !sess && !revert && !strings.HasPrefix(pr.HeadRef, "renovate/") {
 		return fmt.Errorf("branch %q does not start with renovate/ or %s", pr.HeadRef, engine.BatchBranchPrefix)
 	}
 	// (c)
@@ -332,6 +366,16 @@ func (g *Guard) MergePR(ctx context.Context, n int, sha string) (string, error) 
 	scope, ok := g.scopes[n]
 	g.mu.Unlock()
 	if !ok {
+		return "", ErrNoScope
+	}
+	return g.MergeWithScope(ctx, n, sha, scope)
+}
+
+// MergeWithScope is MergePR for a PR verified outside the cycle (a session's
+// or a revert PR): re-fetch, the head must still be sha, every trust check
+// again against scope, then merge pinned to sha.
+func (g *Guard) MergeWithScope(ctx context.Context, n int, sha string, scope Scope) (string, error) {
+	if sha == "" {
 		return "", ErrNoScope
 	}
 	pr, err := g.API.PR(ctx, n)

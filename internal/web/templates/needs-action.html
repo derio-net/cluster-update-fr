@@ -51,6 +51,12 @@
 <table><tr><th>PR</th><th>Title</th><th>Author</th><th>Why ignored</th></tr>
 {{range .Untrusted}}<tr><td>#{{.Number}}</td><td>{{.Title}}</td><td>{{.Author}}</td><td class="meta">{{.Reason}}</td></tr>{{end}}</table>{{end}}
 
+{{if .SessionPRs}}<h2>🧭 Session PRs waiting for your merge</h2>
+<p class="meta">A session opens PRs but never merges them. Each was verified against its session's scope (session bot, its own branch, signed commits, files within the update); merging re-verifies and pins the verified head.</p>
+<table><tr><th>PR</th><th>Session</th><th>Title</th><th>Branch</th><th></th></tr>
+{{range .SessionPRs}}<tr><td>#{{.PR}}</td><td>{{.Session}}</td><td>{{.Title}}</td><td><code>{{.Branch}}</code></td>
+<td>{{if .Untrusted}}<span class="bad">untrusted — will not merge:</span> <span class="meta">{{.Untrusted}}</span>{{else}}{{template "btn" (btn "merge-session-pr" (printf "%d" .PR) $csrf "Merge session PR" "primary")}}{{end}}</td></tr>{{end}}</table>{{end}}
+
 {{if .Sessions}}<h2>Running sessions</h2>
 <table><tr><th>Upgrade</th><th>Type</th><th>Started</th><th>Step</th><th></th></tr>
 {{range .Sessions}}<tr><td>{{.ID}}</td><td>{{.Type}}</td><td>{{when .StartedAt}}</td><td>{{if .StepRunning}}{{.StepName}} (idle clock paused){{else}}—{{end}}</td>

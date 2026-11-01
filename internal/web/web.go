@@ -31,6 +31,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,10 @@ type Backend interface {
 	// POST (c1s-r8).
 	Attach(id, by string) (string, error)
 	StepEvent(id, token string, start bool, name string) error
+	// RequestMerge: a session asks the console to merge its PR (step token).
+	RequestMerge(ctx context.Context, id, token string, pr int) error
+	// MergeSessionPR: the operator's "Merge session PR" click.
+	MergeSessionPR(ctx context.Context, pr int, by string) error
 	SessionFinished(ctx context.Context, id, token, outcome, transcript string) error
 }
 
@@ -126,6 +131,7 @@ func New(b Backend, opts Options) Handlers {
 	sess := http.NewServeMux()
 	sess.HandleFunc("POST /api/sessions/{id}/step", s.apiStep)
 	sess.HandleFunc("POST /api/sessions/{id}/finish", s.apiFinish)
+	sess.HandleFunc("POST /api/sessions/{id}/request-merge", s.apiRequestMerge)
 
 	ui := http.NewServeMux()
 	ui.Handle("GET /{$}", s.page("needs-action"))
@@ -322,6 +328,13 @@ func (s *server) act(w http.ResponseWriter, r *http.Request) {
 	case "attach":
 		s.attachPage(w, r, id, user, "Attaching to session "+id+".")
 		return
+	case "merge-session-pr":
+		n, perr := strconv.Atoi(id)
+		if perr != nil || n <= 0 {
+			http.Error(w, "bad pull request number", http.StatusBadRequest)
+			return
+		}
+		err, msg = s.b.MergeSessionPR(ctx, n, user), "merged session PR #"+id
 	case "end-session":
 		err, msg = s.b.EndSession(ctx, id, user), "session "+id+" ended and cleaned up"
 	default:
@@ -408,12 +421,30 @@ func (s *server) apiFinish(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// apiRequestMerge: {"pr": N}. The session may only ASK; the operator merges.
+func (s *server) apiRequestMerge(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		PR int `json:"pr"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256)).Decode(&in); err != nil || in.PR <= 0 {
+		http.Error(w, "body must be {\"pr\": <number>}", http.StatusBadRequest)
+		return
+	}
+	if err := s.b.RequestMerge(r.Context(), r.PathValue("id"), bearer(r), in.PR); err != nil {
+		apiError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func apiError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, session.ErrBadToken):
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, session.ErrNoSession):
 		http.Error(w, "no such session", http.StatusNotFound)
+	case errors.Is(err, app.ErrBadRequest):
+		http.Error(w, scrub.String(err.Error()), http.StatusUnprocessableEntity)
 	case errors.Is(err, session.ErrTranscriptTooLarge), errors.Is(err, session.ErrFieldTooLarge):
 		http.Error(w, scrub.String(err.Error()), http.StatusRequestEntityTooLarge)
 	default:

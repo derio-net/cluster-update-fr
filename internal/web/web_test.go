@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -82,6 +83,17 @@ func (f *fakeBackend) StepEvent(id, token string, start bool, name string) error
 		return session.ErrBadToken
 	}
 	f.rec("step", id, name)
+	return nil
+}
+func (f *fakeBackend) RequestMerge(_ context.Context, id, token string, pr int) error {
+	if token != "good" {
+		return session.ErrBadToken
+	}
+	f.rec("request-merge", id, fmt.Sprint(pr))
+	return nil
+}
+func (f *fakeBackend) MergeSessionPR(_ context.Context, pr int, by string) error {
+	f.rec("merge-session-pr", fmt.Sprint(pr), by)
 	return nil
 }
 func (f *fakeBackend) SessionFinished(_ context.Context, id, token, outcome, transcript string) error {
@@ -435,6 +447,40 @@ func TestAttachIsAPostAndCSPFormActionIsSelf(t *testing.T) {
 	}
 	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self';") {
 		t.Errorf("CSP = %q", csp)
+	}
+}
+
+// c1c-r1: a session ASKS for a merge (step token, {"pr": N}); the operator
+// merges with a CSRF-checked click; the session API has no merge.
+func TestSessionPRMergeFlow(t *testing.T) {
+	b, hs := newHandlers(t)
+	api := func(path, token, body string) int {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		hs.Session.ServeHTTP(w, r)
+		return w.Code
+	}
+	if c := api("/api/sessions/frank-os-1/request-merge", "bad", `{"pr":42}`); c != http.StatusForbidden {
+		t.Errorf("bad token = %d", c)
+	}
+	if c := api("/api/sessions/frank-os-1/request-merge", "good", `{"pr":"x"}`); c != http.StatusBadRequest {
+		t.Errorf("bad body = %d", c)
+	}
+	if c := api("/api/sessions/frank-os-1/request-merge", "good", `{"pr":42}`); c != http.StatusAccepted {
+		t.Errorf("request-merge = %d", c)
+	}
+	if c := api("/api/sessions/frank-os-1/merge", "good", `{"pr":42}`); c != http.StatusNotFound && c != http.StatusMethodNotAllowed {
+		t.Errorf("a session must have no merge endpoint: %d", c)
+	}
+	h := hs.UI
+	if w := post(h, "/act/merge-session-pr", "derio", url.Values{"id": {"42"}}); w.Code != http.StatusForbidden {
+		t.Errorf("merge without CSRF = %d", w.Code)
+	}
+	tok := csrfFor(t, h, "derio")
+	post(h, "/act/merge-session-pr", "derio", url.Values{"id": {"42"}, "csrf": {tok}})
+	if last := b.calls[len(b.calls)-1]; last != (call{"merge-session-pr", "42", "derio"}) {
+		t.Errorf("calls = %+v", b.calls)
 	}
 }
 

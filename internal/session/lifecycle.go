@@ -24,6 +24,18 @@ func (l *Launcher) StepStarted(id, token, name string) error {
 	return l.step(id, token, true, name)
 }
 
+// Authorize checks a session API call's step token (no state change).
+func (l *Launcher) Authorize(id, token string) error {
+	rec, ok := l.Get(id)
+	if !ok {
+		return ErrNoSession
+	}
+	if !l.checkToken(rec, token) {
+		return ErrBadToken
+	}
+	return nil
+}
+
 // StepFinished restarts the idle clock from now.
 func (l *Launcher) StepFinished(id, token string) error { return l.step(id, token, false, "") }
 
