@@ -124,14 +124,18 @@ type View struct {
 	Omni       *inventory.Dependency
 	Sessions   []session.Record
 	SessionPRs []SessionPR // session PRs waiting for the operator's merge
-	Alarms     []alarm.Record
-	Updates    []store.Update
-	History    []store.Event
-	Errors     []string
-	Warnings   []string
-	LastScan   time.Time
-	LastReport time.Time
-	ReportHour int
+	// DeclRevision is the frank commit the declarations were read at ("" =
+	// unknown); declOK says they loaded without error.
+	DeclRevision string
+	declOK       bool
+	Alarms       []alarm.Record
+	Updates      []store.Update
+	History      []store.Event
+	Errors       []string
+	Warnings     []string
+	LastScan     time.Time
+	LastReport   time.Time
+	ReportHour   int
 }
 
 const (
@@ -313,13 +317,28 @@ func (a *App) Cycle(ctx context.Context) View {
 		v.Errors = append(v.Errors, what+": "+scrub.String(err.Error()))
 	}
 
-	decl, err := frankrepo.Load(ctx, a.Repo)
+	// Pin the repo to one commit when the source can, so the declarations
+	// are known to come from exactly that revision (sec2-8).
+	src, declRev := a.Repo, ""
+	if p, ok := a.Repo.(frankrepo.Pinner); ok {
+		if ps, rev, perr := p.Pin(ctx); perr != nil {
+			fail("frank repo revision", perr)
+		} else {
+			src, declRev = ps, rev
+		}
+	}
+	decl, err := frankrepo.Load(ctx, src)
+	declOK := err == nil
 	if err != nil {
 		fail("frank repo", err)
 	}
 	if decl == nil {
 		decl = &frankrepo.Declarations{}
 	}
+	if decl.Errors[frankrepo.FrankVersionsPath] != "" || decl.Errors[frankrepo.HopVersionsPath] != "" {
+		declOK = false
+	}
+	v.DeclRevision, v.declOK = declRev, declOK
 	for p, e := range decl.Errors {
 		v.Errors = append(v.Errors, p+": "+e)
 	}
@@ -531,7 +550,7 @@ func (a *App) verify(ctx context.Context, decl *frankrepo.Declarations, frank, h
 	}
 	for _, u := range a.Store.Updates() {
 		if u.RevertSHA != "" && u.State != store.RolledBack {
-			a.verifyRevert(ctx, decl, frank, hop, u)
+			a.verifyRevert(ctx, decl, frank, hop, u, v)
 			continue
 		}
 		if u.State != store.Merged && u.State != store.Applied {
@@ -602,7 +621,7 @@ func (a *App) verify(ctx context.Context, decl *frankrepo.Declarations, frank, h
 // workloads ArgoCD's last sync operation contains the revert commit and the
 // smoke checks pass; for OS steps the nodes run the (reverted) declared
 // version. Until then the update keeps its state and says so.
-func (a *App) verifyRevert(ctx context.Context, decl *frankrepo.Declarations, frank, hop *live.Snapshot, u store.Update) {
+func (a *App) verifyRevert(ctx context.Context, decl *frankrepo.Declarations, frank, hop *live.Snapshot, u store.Update, v *View) {
 	snap, cv := frank, decl.Frank
 	if u.Cluster == "hop" {
 		snap, cv = hop, decl.Hop
@@ -610,6 +629,10 @@ func (a *App) verifyRevert(ctx context.Context, decl *frankrepo.Declarations, fr
 	var out verify.Outcome
 	switch u.Kind {
 	case inventory.KindTalos, inventory.KindKubernetes:
+		if why := a.osRevertDeclared(ctx, cv, u, v); why != "" {
+			out = verify.Outcome{To: verify.OutcomeWaiting, Reason: why}
+			break
+		}
 		out = verify.OS(cv, snap, a.clusterSmoke(ctx, decl, u.Cluster))
 	default:
 		apps := u.Apps
@@ -638,6 +661,33 @@ func (a *App) verifyRevert(ctx context.Context, decl *frankrepo.Declarations, fr
 		return
 	}
 	_ = a.Store.Edit(u.ID, func(x *store.Update) { x.Verification = "revert merged, not yet verified: " + out.Reason })
+}
+
+// osRevertDeclared: an OS revert is checked against the declarations only
+// when they are trustworthy for it (sec2-8) — loaded without error, from a
+// known commit that contains the revert, with both versions declared, and
+// the reverted-to version no longer the one the update installed. Any doubt
+// returns a reason and the revert stays "not yet verified" (fail closed).
+func (a *App) osRevertDeclared(ctx context.Context, cv frankrepo.ClusterVersions, u store.Update, v *View) string {
+	switch {
+	case !v.declOK:
+		return "declarations did not load cleanly"
+	case v.DeclRevision == "":
+		return "declarations were not read at a known commit"
+	case cv.Talos == "" || cv.Kubernetes == "":
+		return "the cluster's versions are not declared"
+	case u.Kind == inventory.KindTalos && cv.Talos == u.To, u.Kind == inventory.KindKubernetes && cv.Kubernetes == u.To:
+		return "the declared version is still the reverted one (" + u.To + ")"
+	case a.Ancestry == nil:
+		return "cannot check that the declarations contain the revert"
+	}
+	if v.DeclRevision != u.RevertSHA {
+		ok, err := a.Ancestry.Contains(ctx, u.RevertSHA, v.DeclRevision)
+		if err != nil || !ok {
+			return fmt.Sprintf("declarations at %.8s do not contain the revert %.8s yet", v.DeclRevision, u.RevertSHA)
+		}
+	}
+	return ""
 }
 
 // batchOutcome verifies a batch through its members, each verified on its

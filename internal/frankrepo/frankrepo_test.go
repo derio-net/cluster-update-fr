@@ -103,6 +103,8 @@ func TestGitHubSource(t *testing.T) {
 				"encoding": "base64",
 				"content":  base64.StdEncoding.EncodeToString([]byte("talos: \"1.12.6\"\n")),
 			})
+		case "/repos/derio-net/frank/commits/main":
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "5e8b2d6f0a4c19e73b5d8f2a6c0e4b9d1f3a7c58"})
 		case "/repos/derio-net/frank/contents/smoke":
 			_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "a.yaml", "type": "file"}, {"name": "README.md", "type": "file"}})
 		default:
@@ -121,5 +123,10 @@ func TestGitHubSource(t *testing.T) {
 	names, err := src.List(context.Background(), "smoke")
 	if err != nil || len(names) != 1 || names[0] != "a.yaml" {
 		t.Errorf("List = %v %v", names, err)
+	}
+	// sec2-8: Pin fixes the ref to its commit, so a Load reads one revision.
+	pinned, rev, err := src.Pin(context.Background())
+	if err != nil || rev != "5e8b2d6f0a4c19e73b5d8f2a6c0e4b9d1f3a7c58" || pinned.(GitHubSource).Ref != rev {
+		t.Fatalf("Pin = %v %q %v", pinned, rev, err)
 	}
 }

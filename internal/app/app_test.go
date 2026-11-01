@@ -735,6 +735,41 @@ type containsAll struct{}
 
 func (containsAll) Contains(context.Context, string, string) (bool, error) { return true, nil }
 
+type containsNone struct{}
+
+func (containsNone) Contains(context.Context, string, string) (bool, error) { return false, nil }
+
+// sec2-8: an OS revert is judged against the declarations only when they
+// are trustworthy for it; every doubt keeps it "not yet verified".
+func TestOSRevertVerificationFailsClosed(t *testing.T) {
+	now := t0
+	a, _, _, _ := newApp(t, &now, false)
+	u := store.Update{ID: "frank-os-talos-1.13.4", Kind: "talos", Cluster: "frank", To: "1.13.4", RevertSHA: "r1"}
+	good := frankrepo.ClusterVersions{Talos: "1.12.6", Kubernetes: "1.35.3"}
+	ok := &View{declOK: true, DeclRevision: "main-sha"}
+	a.Ancestry = containsAll{}
+	if why := a.osRevertDeclared(context.Background(), good, u, ok); why != "" {
+		t.Fatalf("trustworthy declarations refused: %s", why)
+	}
+	for name, c := range map[string]struct {
+		cv  frankrepo.ClusterVersions
+		v   *View
+		anc verify.Ancestry
+	}{
+		"declarations failed to load":  {good, &View{declOK: false, DeclRevision: "main-sha"}, containsAll{}},
+		"no known revision":            {good, &View{declOK: true}, containsAll{}},
+		"versions not declared":        {frankrepo.ClusterVersions{}, ok, containsAll{}},
+		"still the reverted version":   {frankrepo.ClusterVersions{Talos: "1.13.4", Kubernetes: "1.35.3"}, ok, containsAll{}},
+		"revision lacks the revert":    {good, ok, containsNone{}},
+		"no way to check the ancestry": {good, ok, nil},
+	} {
+		a.Ancestry = c.anc
+		if why := a.osRevertDeclared(context.Background(), c.cv, u, c.v); why == "" {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 // c1c-r12: opening a revert PR rolls nothing back; the console merges its own
 // revert PR (console bot, cluster-update/revert-<n>-, files within the
 // reverted PR) and the update is rolled-back only once the revert is applied

@@ -96,6 +96,46 @@ func (s GitHubSource) get(ctx context.Context, path string, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// Pinner is a Source that can fix one commit, so a whole Load reads a
+// single, named revision (sec2-8: a verification may then require that
+// revision to contain a given commit).
+type Pinner interface {
+	Pin(ctx context.Context) (Source, string, error)
+}
+
+// Pin resolves Ref to its commit SHA and returns a source reading only it.
+func (s GitHubSource) Pin(ctx context.Context) (Source, string, error) {
+	u := fmt.Sprintf("%s/repos/%s/commits/%s", s.API, s.Repo, url.PathEscape(s.Ref))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if s.Token != nil {
+		if t := s.Token(); t != "" {
+			req.Header.Set("Authorization", "Bearer "+t)
+		}
+	}
+	client := s.HTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	var c struct {
+		SHA string `json:"sha"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&c) != nil || len(c.SHA) != 40 {
+		return nil, "", fmt.Errorf("frankrepo: cannot resolve %s to a commit (%d)", s.Ref, resp.StatusCode)
+	}
+	p := s
+	p.Ref = c.SHA
+	return p, c.SHA, nil
+}
+
 func (s GitHubSource) Read(ctx context.Context, path string) ([]byte, error) {
 	var f struct {
 		Content  string `json:"content"`
