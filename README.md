@@ -130,6 +130,15 @@ Every credential is optional; a missing one disables only what needs it.
   per-step / total-step / step-count caps that end a session even mid-step and
   alarm `#security` (routine lifetime warnings stay in the console). A pod
   that fails verification on any cycle is ended.
+- **One session credential** (c1d-r11): every session uses the same session
+  GitHub App, so its token can push to any session's branch. Branch ownership
+  (`cluster-update/session-<id>/<topic>`) is a **naming rule the console
+  checks, not authentication** — a session can write under another session's
+  prefix, and GitHub cannot tell the two apart. What bounds the damage: the
+  console verifies a session PR against the requesting session's own scope
+  (its id, its dependency's files) and merges only the exact head SHA it
+  verified, on the operator's click; and frank's branch ruleset keeps `main`
+  writable only through the console's approved merges.
 - **Credentials**: two redaction layers — exact values of every credential
   the console holds or injects (every file under `SESSION_SECRET_DIR`
   registered at start and each cycle), then patterns — over logs, pages,
