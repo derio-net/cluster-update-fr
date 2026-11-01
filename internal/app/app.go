@@ -83,12 +83,13 @@ type App struct {
 	Now      func() time.Time
 	Log      *log.Logger
 
-	once   sync.Once
-	engine *engine.Engine
-	guard  *trust.Guard
-	mu     sync.RWMutex
-	view   View
-	smoke  map[string]verify.SmokeResult
+	once     sync.Once
+	outboxMu sync.Mutex // serialises outbox flushes (sends happen outside the store lock)
+	engine   *engine.Engine
+	guard    *trust.Guard
+	mu       sync.RWMutex
+	view     View
+	smoke    map[string]verify.SmokeResult
 }
 
 // GuidedStep is an OS step shown under Guided upgrades.
@@ -592,21 +593,12 @@ func (a *App) alarms(ctx context.Context, inv *inventory.Inventory, frank, hop *
 	next, fired := alarm.Evaluate(prev, findings, scanned, a.now())
 	_ = a.Store.PutBlob(blobAlarms, next)
 
-	var outbox []string
-	a.Store.GetBlob(blobOutbox, &outbox)
+	var texts []string
 	for _, f := range fired {
-		outbox = append(outbox, alarm.FormatAlarm(f, a.Cfg.ConsoleURL))
+		texts = append(texts, alarm.FormatAlarm(f, a.Cfg.ConsoleURL))
 	}
-	var keep []string
-	for _, msg := range outbox {
-		if err := a.sendErr(ctx, msg); err != nil {
-			keep = append(keep, msg)
-		}
-	}
-	if len(keep) > 50 {
-		keep = keep[len(keep)-50:] // bounded: a long outage must not flood on recovery
-	}
-	_ = a.Store.PutBlob(blobOutbox, keep)
+	a.enqueue(true, texts...)
+	a.flushOutbox(ctx)
 	for _, r := range next {
 		if r.State != alarm.StateResolved {
 			v.Alarms = append(v.Alarms, r)
@@ -629,15 +621,13 @@ func (a *App) sessionAlarms(ctx context.Context) []string {
 		return nil
 	}
 	msgs := a.Launcher.Alarms()
+	var texts []string
 	for _, m := range msgs {
-		text := "🚨 <b>Upgrade session</b> — " + escape(m)
 		a.logf("security alarm: %s", m)
-		if err := a.sendErr(ctx, text); err != nil {
-			var outbox []string
-			a.Store.GetBlob(blobOutbox, &outbox)
-			_ = a.Store.PutBlob(blobOutbox, append(outbox, text))
-		}
+		texts = append(texts, "🚨 <b>Upgrade session</b> — "+escape(m))
 	}
+	a.enqueue(true, texts...)
+	a.flushOutbox(ctx)
 	return msgs
 }
 

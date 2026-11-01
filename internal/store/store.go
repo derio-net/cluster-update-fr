@@ -506,6 +506,24 @@ func (s *Store) UpdateBlob(key string, fn func(cur json.RawMessage) (json.RawMes
 	return nil
 }
 
+// UpdateJSON is UpdateBlob for a typed value: fn mutates the decoded value
+// in place, atomically under the store lock (read-modify-write races between
+// writers are impossible; the state flock makes this process the only one).
+func UpdateJSON[T any](s *Store, key string, fn func(*T) error) error {
+	return s.UpdateBlob(key, func(cur json.RawMessage) (json.RawMessage, error) {
+		var v T
+		if len(cur) > 0 {
+			if err := json.Unmarshal(cur, &v); err != nil {
+				return nil, fmt.Errorf("store: blob %s unreadable: %w", key, err)
+			}
+		}
+		if err := fn(&v); err != nil {
+			return nil, err
+		}
+		return json.Marshal(v)
+	})
+}
+
 // --- reconciliation (R26) ---------------------------------------------------
 
 // Cleanup kinds.

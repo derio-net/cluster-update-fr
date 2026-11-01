@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -322,6 +323,7 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	l.sets[rec.ID], l.tokens[rec.ID] = set, token
 	l.mu.Unlock()
 	_ = l.Store.Edit(req.UpgradeID, func(u *store.Update) { u.Session = pod })
+	l.clearAlarmKeys(req.UpgradeID) // a fresh session: its incidents alarm anew
 	l.Store.AddEvent(store.Event{Update: req.UpgradeID, Action: "session-started", Reason: req.Type + " session " + pod})
 	return rec, true, nil
 }
@@ -375,7 +377,7 @@ func (l *Launcher) createOwned(ctx context.Context, id, res, name string, conten
 	}
 	if !ours {
 		msg := fmt.Sprintf("session %s: %s/%s exists and is not this session's; start refused", id, res, name)
-		l.alarm(msg)
+		l.alarm(id+"|foreign-"+res+"|"+name, msg)
 		l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", Reason: msg})
 		return false, fmt.Errorf("%w: %s/%s", ErrForeignObject, res, name)
 	}
@@ -491,16 +493,45 @@ func (l *Launcher) refuseUnknown(ctx context.Context, id, target, pod string, li
 	Locks{Store: l.Store}.Release(target, id)
 	_ = l.Store.Save()
 	msg := fmt.Sprintf("session %s: pod %s is not the console's own (%s); %s", id, pod, why, action)
-	l.alarm(msg)
+	l.alarm(id+"|foreign-pod|"+strings.SplitN(action, ":", 2)[0], msg)
 	l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", By: "launcher", Reason: msg})
 	return fmt.Errorf("%w: %s", ErrForeignObject, msg)
 }
 
-// alarm queues a #security alarm for the app to send.
-func (l *Launcher) alarm(msg string) {
+const alarmKeysBlob = "session-alarm-keys"
+
+// alarm queues a #security alarm for the app to send, once per key: the
+// same (session, reason, state) never alarms twice, so a cleanup stuck for
+// hours is one message, not one per cycle. Keys persist across restarts and
+// are cleared when a fresh session is created for the id.
+func (l *Launcher) alarm(key, msg string) {
+	fresh := false
+	_ = store.UpdateJSON(l.Store, alarmKeysBlob, func(m *map[string]bool) error {
+		if *m == nil {
+			*m = map[string]bool{}
+		}
+		if !(*m)[key] {
+			(*m)[key], fresh = true, true
+		}
+		return nil
+	})
+	if !fresh {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.alarms = append(l.alarms, scrub.String(msg))
+}
+
+func (l *Launcher) clearAlarmKeys(id string) {
+	_ = store.UpdateJSON(l.Store, alarmKeysBlob, func(m *map[string]bool) error {
+		for k := range *m {
+			if strings.HasPrefix(k, id+"|") {
+				delete(*m, k)
+			}
+		}
+		return nil
+	})
 }
 
 // Alarms returns (and clears) pending security alarms: forced ends at the

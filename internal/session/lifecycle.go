@@ -94,11 +94,11 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 		// its credentials (c1s-r1). Checked before anything else, and they
 		// alarm in #security.
 		if l.HardCeiling > 0 && now.Sub(r.StartedAt) > l.HardCeiling {
-			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: hard ceiling %s reached (step %q reported running: %v)", l.HardCeiling, r.StepName, r.StepRunning)))
+			ended = append(ended, l.endAlarm(ctx, r, "hard-ceiling", fmt.Sprintf("ended: hard ceiling %s reached (step %q reported running: %v)", l.HardCeiling, r.StepName, r.StepRunning)))
 			continue
 		}
 		if r.StepRunning && l.StepCap > 0 && now.Sub(r.StepSince) > l.StepCap {
-			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: step %q ran past the %s per-step cap", r.StepName, l.StepCap)))
+			ended = append(ended, l.endAlarm(ctx, r, "step-cap", fmt.Sprintf("ended: step %q ran past the %s per-step cap", r.StepName, l.StepCap)))
 			continue
 		}
 		total := r.StepTotal
@@ -106,11 +106,11 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 			total += now.Sub(r.StepSince)
 		}
 		if l.StepTotalCap > 0 && total > l.StepTotalCap {
-			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: %s of step-running time passed the %s per-session cap", total.Round(time.Minute), l.StepTotalCap)))
+			ended = append(ended, l.endAlarm(ctx, r, "step-total", fmt.Sprintf("ended: %s of step-running time passed the %s per-session cap", total.Round(time.Minute), l.StepTotalCap)))
 			continue
 		}
 		if l.MaxStepStarts > 0 && r.StepStarts > l.MaxStepStarts {
-			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: %d step starts passed the %d per-session cap", r.StepStarts, l.MaxStepStarts)))
+			ended = append(ended, l.endAlarm(ctx, r, "step-starts", fmt.Sprintf("ended: %d step starts passed the %d per-session cap", r.StepStarts, l.MaxStepStarts)))
 			continue
 		}
 		var pod livePod
@@ -120,7 +120,7 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 			// an ephemeral container added after start (kubectl debug,
 			// sharing the credential volume) ends the session.
 			if why := l.verifyOwned(ctx, r, pod); why != "" {
-				ended = append(ended, l.endAlarm(ctx, r, "ended: the session pod failed verification: "+why))
+				ended = append(ended, l.endAlarm(ctx, r, "verify", "ended: the session pod failed verification: "+why))
 				continue
 			}
 		}
@@ -161,13 +161,17 @@ func (l *Launcher) endFor(ctx context.Context, r Record, outcome string) Ended {
 
 // endAlarm ends a session forcibly and marks the end as a security alarm.
 // If the cleanup fails (API unreachable) the record stays and the next tick
-// tries again; the alarm says so.
-func (l *Launcher) endAlarm(ctx context.Context, r Record, outcome string) Ended {
+// tries again; the alarm says so. Alarms are de-duplicated by (session,
+// kind, cleanup state): a stuck cleanup alarms once, and again only when its
+// state changes (e.g. the cleanup finally completes).
+func (l *Launcher) endAlarm(ctx context.Context, r Record, kind, outcome string) Ended {
 	e := Ended{ID: r.ID, Outcome: outcome, Alarm: true}
+	state := "done"
 	if err := l.End(ctx, r.ID, outcome, "lifecycle", ""); err != nil {
 		e.Outcome += " — CLEANUP INCOMPLETE: " + scrub.String(err.Error())
+		state = "incomplete"
 	}
-	l.alarm("session " + r.ID + " " + e.Outcome)
+	l.alarm(r.ID+"|"+kind+"|"+state, "session "+r.ID+" "+e.Outcome)
 	return e
 }
 

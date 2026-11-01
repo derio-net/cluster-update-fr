@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derio-net/cluster-update-fr/internal/kube"
 	"github.com/derio-net/cluster-update-fr/internal/store"
 )
 
@@ -201,6 +202,37 @@ func TestEphemeralContainerEndsTheSession(t *testing.T) {
 	}
 	if _, ok := k.objects["secrets/"+SecretName("pr-5")]; ok {
 		t.Error("credentials survived")
+	}
+}
+
+type stuckDelete struct{ *fakeKube }
+
+func (s stuckDelete) Delete(_ context.Context, _, res, _ string) error {
+	return &kube.APIError{Code: 500, Reason: "InternalError"}
+}
+
+// A cleanup that keeps failing alarms once, not once per cycle; when it
+// finally completes (a state change) it alarms again.
+func TestStuckCleanupAlarmsOnce(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	l.HardCeiling = 16 * time.Hour
+	start(t, l, "pr-7", TypeChartMajor)
+	l.Kube = stuckDelete{k}
+	now = now.Add(17 * time.Hour)
+	var alarms []string
+	for i := 0; i < 5; i++ {
+		l.Tick(context.Background())
+		alarms = append(alarms, l.Alarms()...)
+	}
+	if len(alarms) != 1 || !strings.Contains(alarms[0], "CLEANUP INCOMPLETE") {
+		t.Fatalf("alarms over 5 stuck ticks = %v", alarms)
+	}
+	l.Kube = k
+	l.Tick(context.Background())
+	if a := l.Alarms(); len(a) != 1 || strings.Contains(a[0], "INCOMPLETE") {
+		t.Fatalf("completion must alarm once more: %v", a)
 	}
 }
 
