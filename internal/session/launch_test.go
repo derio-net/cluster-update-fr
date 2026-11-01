@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,22 @@ func (f *fakeKube) Delete(_ context.Context, ns, res, name string) error {
 func (f *fakeKube) Get(_ context.Context, path string, out any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if p, q, ok := strings.Cut(path, "?labelSelector="); ok { // a list
+		res := p[strings.LastIndex(p, "/")+1:]
+		sel, _ := url.QueryUnescape(q)
+		lk, lv, _ := strings.Cut(sel, "=")
+		var items []any
+		for k, m := range f.objects {
+			if !strings.HasPrefix(k, res+"/") {
+				continue
+			}
+			if labels, _ := m["metadata"].(map[string]any)["labels"].(map[string]any); labels[lk] == lv {
+				items = append(items, m)
+			}
+		}
+		b, _ := json.Marshal(map[string]any{"items": items})
+		return json.Unmarshal(b, out)
+	}
 	parts := strings.Split(path, "/")
 	k := parts[len(parts)-2] + "/" + parts[len(parts)-1]
 	m, ok := f.objects[k]

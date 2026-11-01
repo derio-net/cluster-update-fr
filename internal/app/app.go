@@ -40,6 +40,8 @@ type GitHubAPI interface {
 	PRCommits(ctx context.Context, n int) ([]forge.Commit, error)
 	PRFiles(ctx context.Context, n int) ([]string, error)
 	PRPatches(ctx context.Context, n int) (map[string]forge.FilePatch, error)
+	Branches(ctx context.Context, prefix string) ([]string, error)
+	DeleteBranch(ctx context.Context, branch string) error
 	LastPush(ctx context.Context, branch string) (forge.Push, error)
 }
 
@@ -849,7 +851,11 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapsho
 			}
 		}
 	}
-	cleanups, errs := a.Store.Reconcile(store.ReconcileInput{OpenPRs: open, MergedPRs: merged, SessionPods: pods})
+	stale, err := a.staleBranches(ctx, prs)
+	if err != nil {
+		v.Errors = append(v.Errors, "branches: "+scrub.String(err.Error()))
+	}
+	cleanups, errs := a.Store.Reconcile(store.ReconcileInput{OpenPRs: open, MergedPRs: merged, SessionPods: pods, StaleBranches: stale})
 	for _, err := range errs {
 		a.logf("%v", err)
 		v.Errors = append(v.Errors, scrub.String(err.Error()))
@@ -864,8 +870,52 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapsho
 				}
 				a.Store.AddEvent(store.Event{Update: c.Target, Action: "cleanup", Reason: c.Reason})
 			}
+		case store.CleanupBranch:
+			if err := a.GitHub.DeleteBranch(ctx, c.Target); err != nil && !errors.Is(err, forge.ErrNotFound) {
+				v.Errors = append(v.Errors, "cleanup "+c.Target+": "+scrub.String(err.Error()))
+				continue
+			}
+			a.Store.AddEvent(store.Event{Update: c.Target, Action: "cleanup", Reason: c.Reason})
 		}
 	}
+	// Session objects and locks no session record accounts for (c1c-r16).
+	if a.Launcher != nil {
+		if _, err := a.Launcher.ReconcileOrphans(ctx); err != nil {
+			v.Errors = append(v.Errors, "session leftovers: "+scrub.String(err.Error()))
+		}
+	}
+}
+
+// staleBranchAge: a console branch younger than this may still be about to
+// get its PR (ApproveBatch / Revert create the branch first).
+const staleBranchAge = time.Hour
+
+// staleBranches lists the console's own batch and revert branches that no
+// open PR uses and that are older than staleBranchAge (their name carries
+// the creation time, UTC 20060102-150405).
+func (a *App) staleBranches(ctx context.Context, prs []forge.PR) ([]string, error) {
+	inUse := map[string]bool{}
+	for _, p := range prs {
+		inUse[p.HeadRef] = true
+	}
+	var out []string
+	for _, prefix := range []string{engine.BatchBranchPrefix, engine.RevertBranchPrefix} {
+		names, err := a.GitHub.Branches(ctx, prefix)
+		if err != nil {
+			return out, err
+		}
+		for _, b := range names {
+			if inUse[b] || len(b) < 15 {
+				continue
+			}
+			made, err := time.Parse("20060102-150405", b[len(b)-15:])
+			if err != nil || a.now().Sub(made) < staleBranchAge {
+				continue
+			}
+			out = append(out, b)
+		}
+	}
+	return out, nil
 }
 
 // Metrics renders the exported state.

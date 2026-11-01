@@ -750,7 +750,7 @@ func (s *Store) Reconcile(in ReconcileInput) ([]Cleanup, []error) {
 		}
 	}
 	for _, b := range in.StaleBranches {
-		out = append(out, Cleanup{Kind: CleanupBranch, Target: b, Reason: "batch branch with no open PR"})
+		out = append(out, Cleanup{Kind: CleanupBranch, Target: b, Reason: "console branch with no open PR"})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Target < out[j].Target })
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Error() < errs[j].Error() })

@@ -297,6 +297,45 @@ func TestEverySessionFieldIsCappedAndBoundedScrubbed(t *testing.T) {
 	}
 }
 
+// c1c-r16: Secrets and pods the console made that no session record
+// accounts for, and locks whose holder has no session, are reconciled away;
+// a live session is untouched.
+func TestReconcileOrphans(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	start(t, l, "pr-live", TypeChartMajor)
+	_, _, _ = l.Start(context.Background(), req("pr-gone", TypeStateful, "gitea"))
+	// pr-gone's record vanishes (e.g. restored from an older state file);
+	// its pod, Secrets and lock are left behind.
+	_ = l.update(func(m map[string]Record) error { delete(m, "pr-gone"); return nil })
+	k.objects["secrets/"+SecretName("pr-orphan")] = map[string]any{"metadata": map[string]any{"name": SecretName("pr-orphan"),
+		"labels": map[string]any{kube.ManagedByLabel: kube.ManagedBy, LabelRunID: "pr-orphan"}}}
+	orphans, err := l.ReconcileOrphans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"pods/" + PodName("pr-gone"), "secrets/" + SecretName("pr-gone"), "secrets/" + BriefName("pr-gone"), "secrets/" + SecretName("pr-orphan")} {
+		if _, ok := k.objects[gone]; ok {
+			t.Errorf("%s survived", gone)
+		}
+	}
+	for _, kept := range []string{"pods/" + PodName("pr-live"), "secrets/" + SecretName("pr-live")} {
+		if _, ok := k.objects[kept]; !ok {
+			t.Errorf("the live session's %s was removed", kept)
+		}
+	}
+	if h := (Locks{Store: l.Store}).Holder(Target(TypeStateful, "frank", "gitea")); h != "" {
+		t.Errorf("orphan lock still held by %q", h)
+	}
+	if (Locks{Store: l.Store}).Holder(Target(TypeChartMajor, "frank", "litellm")) != "pr-live" {
+		t.Error("the live session's lock was released")
+	}
+	if len(orphans) != 5 {
+		t.Errorf("orphans = %+v", orphans)
+	}
+}
+
 type stuckDelete struct{ *fakeKube }
 
 func (s stuckDelete) Delete(_ context.Context, _, res, _ string) error {

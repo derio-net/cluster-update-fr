@@ -52,6 +52,8 @@ type fakeGitHub struct {
 	noCI     map[string]bool
 	created  []int
 	restored map[string][]string
+	branches []string // console branches on GitHub
+	deleted  []string
 }
 
 const renovateBot = "renovate-frank[bot]"
@@ -190,6 +192,23 @@ func (g *fakeGitHub) CreatePR(_ context.Context, title, head, base, _ string) (f
 	g.files[n] = g.restored[head]
 	return p, nil
 }
+func (g *fakeGitHub) Branches(_ context.Context, prefix string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []string
+	for _, b := range g.branches {
+		if strings.HasPrefix(b, prefix) {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+func (g *fakeGitHub) DeleteBranch(_ context.Context, b string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.deleted = append(g.deleted, b)
+	return nil
+}
 func (g *fakeGitHub) ParentOf(_ context.Context, sha string) (string, error) {
 	return "parent-" + sha, nil
 }
@@ -224,6 +243,17 @@ type memKube struct {
 func (k *memKube) Get(_ context.Context, path string, out any) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if p, _, ok := strings.Cut(path, "?labelSelector="); ok { // a list (managed-by only)
+		res := p[strings.LastIndex(p, "/")+1:]
+		var items []any
+		for key, m := range k.objs {
+			if strings.HasPrefix(key, res+"/") {
+				items = append(items, m)
+			}
+		}
+		b, _ := json.Marshal(map[string]any{"items": items})
+		return json.Unmarshal(b, out)
+	}
 	parts := strings.Split(path, "/")
 	if m, ok := k.objs[parts[len(parts)-2]+"/"+parts[len(parts)-1]]; ok {
 		b, _ := json.Marshal(m)
@@ -552,6 +582,23 @@ func TestSessionPRMergeRoute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// c1c-r16: the console's own batch/revert branches with no open PR are
+// deleted once older than an hour; a young one (its PR may be coming) and
+// one in use stay.
+func TestStaleBranchesAreDeleted(t *testing.T) {
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	old := engine.BatchBranchPrefix + t0.Add(-3*time.Hour).Format("20060102-150405")
+	young := engine.BatchBranchPrefix + t0.Add(-10*time.Minute).Format("20060102-150405")
+	oldRevert := engine.RevertBranchPrefix + "7-" + t0.Add(-2*time.Hour).Format("20060102-150405")
+	gh.branches = []string{old, young, oldRevert}
+	a.Cycle(context.Background())
+	got := strings.Join(gh.deleted, ",")
+	if !strings.Contains(got, old) || !strings.Contains(got, oldRevert) || strings.Contains(got, young) {
+		t.Fatalf("deleted = %v", gh.deleted)
 	}
 }
 

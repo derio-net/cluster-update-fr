@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,54 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 		}
 	}
 	return ended
+}
+
+// Orphan is a leftover ReconcileOrphans removed.
+type Orphan struct{ Kind, Name, Reason string }
+
+// ReconcileOrphans turns leftovers into nothing (c1c-r16): session pods and
+// Secrets the console made (managed-by label) that no session record
+// accounts for, and target locks whose holder has no record. Runs under the
+// start lock, so a Start between its write-ahead record and its creates is
+// never mistaken for a leftover.
+func (l *Launcher) ReconcileOrphans(ctx context.Context) ([]Orphan, error) {
+	l.startMu.Lock()
+	defer l.startMu.Unlock()
+	recs := l.records()
+	var out []Orphan
+	sel := "?labelSelector=" + url.QueryEscape(kube.ManagedByLabel+"="+kube.ManagedBy)
+	for _, res := range []string{"pods", "secrets"} {
+		var list struct {
+			Items []struct {
+				Metadata kube.Meta `json:"metadata"`
+			} `json:"items"`
+		}
+		if err := l.Kube.Get(ctx, "/api/v1/namespaces/"+url.PathEscape(l.Namespace)+"/"+res+sel, &list); err != nil {
+			return out, err
+		}
+		for _, it := range list.Items {
+			id := it.Metadata.Labels[LabelRunID]
+			if r, ok := recs[id]; ok && it.Metadata.Name != "" && (it.Metadata.Name == r.Pod || it.Metadata.Name == SecretName(id) || it.Metadata.Name == BriefName(id)) {
+				continue
+			}
+			if err := l.Kube.Delete(ctx, l.Namespace, res, it.Metadata.Name); err != nil && !kube.IsNotFound(err) {
+				return out, err
+			}
+			o := Orphan{Kind: res, Name: it.Metadata.Name, Reason: "no session record for " + id}
+			l.Store.AddEvent(store.Event{Update: id, Action: "cleanup", By: "reconciler", Reason: o.Kind + "/" + o.Name + ": " + o.Reason})
+			out = append(out, o)
+		}
+	}
+	held := map[string]string{}
+	l.Store.GetBlob(lockBlob, &held)
+	for target, holder := range held {
+		if _, ok := recs[holder]; !ok {
+			Locks{Store: l.Store}.Release(target, holder)
+			out = append(out, Orphan{Kind: "lock", Name: target, Reason: "held by " + holder + ", which has no session"})
+			l.Store.AddEvent(store.Event{Update: holder, Action: "cleanup", By: "reconciler", Reason: "released lock " + target})
+		}
+	}
+	return out, nil
 }
 
 // RegisterCredentials adds every file under CredDir (whatever its name, so a

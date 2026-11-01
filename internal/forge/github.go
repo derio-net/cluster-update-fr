@@ -402,8 +402,27 @@ func (g *GitHub) Contains(ctx context.Context, ancestor, descendant string) (boo
 }
 
 // DeleteBranch removes a branch the console created (a stale batch branch).
+// Only the console's own cluster-update/ branches can ever be deleted.
 func (g *GitHub) DeleteBranch(ctx context.Context, branch string) error {
+	if !strings.HasPrefix(branch, "cluster-update/") || strings.Contains(branch, "..") {
+		return fmt.Errorf("forge: refusing to delete branch %q (not the console's)", branch)
+	}
 	return g.c().do(ctx, http.MethodDelete, g.repo("/git/refs/heads/"+branch), nil, nil, true)
+}
+
+// Branches lists the branch names starting with prefix (matching-refs).
+func (g *GitHub) Branches(ctx context.Context, prefix string) ([]string, error) {
+	var raw []struct {
+		Ref string `json:"ref"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/git/matching-refs/heads/"+prefix), nil, &raw, false); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range raw {
+		out = append(out, strings.TrimPrefix(r.Ref, "refs/heads/"))
+	}
+	return out, nil
 }
 
 // Releases lists the newest release tags of a public repository
