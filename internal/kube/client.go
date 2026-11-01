@@ -84,6 +84,29 @@ func IsConflict(err error) bool {
 	return errors.As(err, &e) && e.Code == http.StatusConflict
 }
 
+// TransportError is a request that never got an HTTP answer (connection
+// refused/reset, DNS, TLS, timeout). Its message is scrubbed.
+type TransportError struct{ Msg string }
+
+func (e *TransportError) Error() string { return e.Msg }
+
+// IsTransient reports an error that says nothing about the object: no
+// answer at all, a timeout, 5xx or 429. 403, 404 and a malformed answer are
+// NOT transient — they are evidence (c1d-r2).
+func IsTransient(err error) bool {
+	var t *TransportError
+	var e *APIError
+	switch {
+	case err == nil:
+		return false
+	case errors.As(err, &t), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return true
+	case errors.As(err, &e):
+		return e.Code >= 500 || e.Code == http.StatusTooManyRequests
+	}
+	return false
+}
+
 // WritePolicy is the console's entire write surface (see the package doc).
 type WritePolicy struct {
 	SessionNamespace string
@@ -354,7 +377,10 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("kube: %s %s: %s", method, path, scrub.String(err.Error()))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("kube: %s %s: %w", method, path, ctxErr)
+		}
+		return &TransportError{Msg: fmt.Sprintf("kube: %s %s: %s", method, path, scrub.String(err.Error()))}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

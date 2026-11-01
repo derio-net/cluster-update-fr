@@ -508,9 +508,11 @@ func (l *Launcher) verifyOwned(ctx context.Context, rec Record, live livePod) (s
 		switch {
 		case kube.IsNotFound(err):
 			return "Secret " + name + " is gone", false
-		case err != nil:
+		case err != nil && kube.IsTransient(err):
 			// A transient read error proves nothing: unknown, not a mismatch.
 			return "Secret " + name + " unreadable: " + scrub.String(err.Error()), true
+		case err != nil: // 403, a decode error: a mismatch
+			return "Secret " + name + " refused or malformed: " + scrub.String(err.Error()), false
 		}
 		if s.Metadata.UID != uid {
 			return fmt.Sprintf("Secret %s UID %q is not the recorded %q (it was replaced)", name, s.Metadata.UID, uid), false

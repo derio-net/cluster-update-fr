@@ -353,24 +353,27 @@ func TestOrphansNotReapedWhenRecordsAreUnreadable(t *testing.T) {
 	}
 }
 
-type flakySecrets struct{ *fakeKube }
+type flakySecrets struct {
+	*fakeKube
+	code int
+}
 
 func (f flakySecrets) Get(ctx context.Context, path string, out any) error {
 	if strings.Contains(path, "/secrets/") {
-		return &kube.APIError{Code: 503, Reason: "ServiceUnavailable"}
+		return &kube.APIError{Code: f.code, Reason: "x"}
 	}
 	return f.fakeKube.Get(ctx, path, out)
 }
 
 // c1d-r2: a transient Secret read error is "unknown", not a mismatch: the
 // session is not killed and no false alarm fires — until it persists for
-// verifyUnknownLimit cycles, which alarms (still no kill).
+// verifyUnknownLimit cycles, which ends the session (and alarms).
 func TestTransientVerifyErrorsDoNotKill(t *testing.T) {
 	now := time.Unix(0, 0)
 	k := newFake()
 	l := launcher(t, k, &now)
 	start(t, l, "pr-1", TypeChartMajor)
-	l.Kube = flakySecrets{k}
+	l.Kube = flakySecrets{k, 503}
 	for i := 1; i < verifyUnknownLimit; i++ {
 		if ended := l.Tick(context.Background()); len(ended) != 0 {
 			t.Fatalf("killed on a transient error: %+v", ended)
@@ -379,14 +382,47 @@ func TestTransientVerifyErrorsDoNotKill(t *testing.T) {
 			t.Fatalf("false alarm after %d unknown cycles: %v", i, a)
 		}
 	}
-	if ended := l.Tick(context.Background()); len(ended) != 0 {
-		t.Fatal("killed at the unknown limit")
+	if ended := l.Tick(context.Background()); len(ended) != 1 || !strings.Contains(ended[0].Outcome, "could not be verified") {
+		t.Fatalf("at the unknown limit the session must end: %+v", ended)
 	}
-	if a := l.Alarms(); len(a) != 1 || !strings.Contains(a[0], "could not be verified") {
-		t.Fatalf("alarm at the limit = %v", a)
+	if _, ok := k.objects["pods/"+PodName("pr-1")]; ok {
+		t.Fatal("pod survived the unknown limit")
 	}
-	if _, ok := k.objects["pods/"+PodName("pr-1")]; !ok {
-		t.Fatal("pod deleted")
+}
+
+// An unknown verify result never suspends the time bounds: the hard
+// ceiling still fires while every verification read fails.
+func TestCeilingFiresWhileVerifyReadsFail(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	l.HardCeiling = 16 * time.Hour
+	start(t, l, "pr-1", TypeChartMajor)
+	l.Kube = flakySecrets{k, 503}
+	now = now.Add(17 * time.Hour)
+	if ended := l.Tick(context.Background()); len(ended) != 1 || !strings.Contains(ended[0].Outcome, "hard ceiling") {
+		t.Fatalf("ceiling while unverifiable: %+v", ended)
+	}
+	// Max lifetime and idle too.
+	k2 := newFake()
+	l2 := launcher(t, k2, &now)
+	start(t, l2, "pr-2", TypeChartMajor)
+	l2.Kube = flakySecrets{k2, 503}
+	now = now.Add(9 * time.Hour)
+	if ended := l2.Tick(context.Background()); len(ended) != 1 || !strings.Contains(ended[0].Outcome, "maximum lifetime") {
+		t.Fatalf("max lifetime while unverifiable: %+v", ended)
+	}
+}
+
+// A 403 is evidence, not a transient error: a mismatch that ends the session.
+func TestForbiddenVerifyReadIsAMismatch(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	start(t, l, "pr-1", TypeChartMajor)
+	l.Kube = flakySecrets{k, 403}
+	if ended := l.Tick(context.Background()); len(ended) != 1 || !strings.Contains(ended[0].Outcome, "failed verification") {
+		t.Fatalf("403 on a recorded Secret: %+v", ended)
 	}
 }
 

@@ -162,6 +162,23 @@ func TestRoleBindingCreateIsRefused(t *testing.T) {
 	}
 }
 
+// c1d-r2: only "no answer", timeouts, 5xx and 429 are transient.
+func TestIsTransient(t *testing.T) {
+	for err, want := range map[error]bool{
+		&TransportError{Msg: "connection refused"}:  true,
+		&APIError{Code: 503}:                        true,
+		&APIError{Code: 429}:                        true,
+		context.DeadlineExceeded:                    true,
+		&APIError{Code: 403}:                        false,
+		&APIError{Code: 404}:                        false,
+		errors.New("invalid character 'x' in JSON"): false,
+	} {
+		if IsTransient(err) != want {
+			t.Errorf("IsTransient(%v) = %v", err, !want)
+		}
+	}
+}
+
 // c1d-r1: an object whose uid the console recorded is deleted with that uid
 // as a precondition whatever its labels now say; no uid → refused.
 func TestDeleteUIDIgnoresLabelsButPinsTheUID(t *testing.T) {

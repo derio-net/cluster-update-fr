@@ -137,43 +137,47 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 		}
 		var pod livePod
 		err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "pods", r.Pod), &pod)
-		if err == nil && r.PodUID != "" {
-			// Full verification every tick: a replaced pod, a changed spec or
-			// an ephemeral container added after start (kubectl debug,
-			// sharing the credential volume) ends the session.
-			why, unknown := l.verifyOwned(ctx, r, pod)
-			switch {
-			case unknown:
-				// Could not tell this tick: skip it, never kill on a transient
-				// error. Bounded: after verifyUnknownLimit in a row, alarm (and
-				// still do not kill) — c1d-r2.
-				n := 0
-				_ = l.update(func(m map[string]Record) error {
-					x := m[r.ID]
-					x.VerifyUnknown++
-					n = x.VerifyUnknown
-					m[r.ID] = x
-					return nil
-				})
-				if n >= verifyUnknownLimit {
-					l.alarm(alarmKey(r.ID, "verify-unknown", r.PodUID, "unknown"), fmt.Sprintf("session %s: its pod could not be verified for %d cycles in a row (%s)", r.ID, n, why))
-				}
-				continue
-			case why != "":
-				ended = append(ended, l.endAlarm(ctx, r, "verify", "ended: the session pod failed verification: "+why))
-				continue
-			case r.VerifyUnknown > 0:
-				_ = l.update(func(m map[string]Record) error { x := m[r.ID]; x.VerifyUnknown = 0; m[r.ID] = x; return nil })
-				l.resolveAlarm(alarmKey(r.ID, "verify-unknown", r.PodUID, "unknown"))
-			}
-		}
+		// Classify (c1d-r2): NotFound → the pod is gone; a transient error
+		// (timeout, 5xx, 429, connection) → unknown; anything else (403, a
+		// decode error) → mismatch. An unknown result only skips the
+		// verify-based kill: every time / ceiling check below still runs.
+		unknown, why := false, ""
 		switch {
 		case kube.IsNotFound(err):
 			ended = append(ended, l.endFor(ctx, r, "needs you: the session pod disappeared"))
 			continue
+		case err != nil && kube.IsTransient(err):
+			unknown, why = true, "pod unreadable: "+scrub.String(err.Error())
 		case err != nil:
-			continue // unreachable API: decide next tick
-		case pod.Status.Phase == "Failed" || pod.Status.Phase == "Succeeded":
+			ended = append(ended, l.endAlarm(ctx, r, "verify", "ended: the session pod could not be read ("+scrub.String(err.Error())+")"))
+			continue
+		case r.PodUID != "":
+			// Full verification every tick: a replaced pod, a changed spec or
+			// an ephemeral container added after start (kubectl debug,
+			// sharing the credential volume) ends the session.
+			why, unknown = l.verifyOwned(ctx, r, pod)
+			if why != "" && !unknown {
+				ended = append(ended, l.endAlarm(ctx, r, "verify", "ended: the session pod failed verification: "+why))
+				continue
+			}
+		}
+		if unknown {
+			n := 0
+			_ = l.update(func(m map[string]Record) error {
+				x := m[r.ID]
+				x.VerifyUnknown++
+				n = x.VerifyUnknown
+				m[r.ID] = x
+				return nil
+			})
+			if n >= verifyUnknownLimit {
+				ended = append(ended, l.endAlarm(ctx, r, "verify-unknown", fmt.Sprintf("ended: the session pod could not be verified for %d cycles in a row (%s)", n, why)))
+				continue
+			}
+		} else if r.VerifyUnknown > 0 {
+			_ = l.update(func(m map[string]Record) error { x := m[r.ID]; x.VerifyUnknown = 0; m[r.ID] = x; return nil })
+		}
+		if !unknown && (pod.Status.Phase == "Failed" || pod.Status.Phase == "Succeeded") {
 			ended = append(ended, l.endFor(ctx, r, "needs you: the session pod stopped ("+pod.Status.Phase+")"))
 			continue
 		}
@@ -198,7 +202,7 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 }
 
 // verifyUnknownLimit: consecutive cycles a pod may be unverifiable before
-// it alarms (it is never killed for it).
+// the session is ended (uid-precondition cleanup) and alarmed.
 const verifyUnknownLimit = 5
 
 // Orphan is a leftover ReconcileOrphans removed.
