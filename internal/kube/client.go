@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,6 +42,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/proxy"
 	"gopkg.in/yaml.v3"
 
 	"github.com/derio-net/cluster-update-fr/internal/scrub"
@@ -196,6 +198,7 @@ type kubeconfig struct {
 			Server   string `yaml:"server"`
 			CAData   string `yaml:"certificate-authority-data"`
 			Insecure bool   `yaml:"insecure-skip-tls-verify"`
+			ProxyURL string `yaml:"proxy-url"`
 		} `yaml:"cluster"`
 	} `yaml:"clusters"`
 	Users []struct {
@@ -227,11 +230,13 @@ func FromKubeconfig(path string) (*Client, error) {
 	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	c := &Client{}
+	proxyURL := ""
 	for _, cl := range kc.Clusters {
 		if cl.Name != clusterName {
 			continue
 		}
 		c.Server = strings.TrimRight(cl.Cluster.Server, "/")
+		proxyURL = cl.Cluster.ProxyURL
 		if cl.Cluster.CAData != "" {
 			ca, err := base64.StdEncoding.DecodeString(cl.Cluster.CAData)
 			if err != nil {
@@ -265,9 +270,55 @@ func FromKubeconfig(path string) (*Client, error) {
 			tlsCfg.Certificates = []tls.Certificate{pair}
 		}
 	}
+	tr := &http.Transport{TLSClientConfig: tlsCfg} // Proxy nil: never the environment's proxy
+	if err := applyProxy(tr, proxyURL); err != nil {
+		return nil, err
+	}
 	c.Token = func() string { return bearer }
-	c.HTTP = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	c.HTTP = &http.Client{Timeout: 30 * time.Second, Transport: tr}
 	return c, nil
+}
+
+// applyProxy routes tr through the kubeconfig cluster's proxy-url (Hop's
+// kubeconfig names the userspace tailscale sidecar, socks5://localhost:1055).
+// socks5/socks5h dial through a SOCKS5 dialer; http/https set tr.Proxy. TLS to
+// the API server is unchanged either way: the proxy carries the bytes, the
+// transport still verifies the server against the kubeconfig's CA. A
+// proxy-url that is set but unparseable or of an unknown scheme is an error,
+// never a silent direct connection; an unreachable proxy fails the request
+// (there is no fallback dial). An absent proxy-url means a direct connection,
+// as kubectl does.
+func applyProxy(tr *http.Transport, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" {
+		return errors.New("kube: kubeconfig proxy-url is invalid")
+	}
+	switch u.Scheme {
+	case "socks5", "socks5h":
+		var auth *proxy.Auth
+		if u.User != nil {
+			pw, _ := u.User.Password()
+			auth = &proxy.Auth{User: u.User.Username(), Password: pw}
+		}
+		d, err := proxy.SOCKS5("tcp", u.Host, auth, &net.Dialer{Timeout: 10 * time.Second})
+		if err != nil {
+			return fmt.Errorf("kube: kubeconfig proxy-url: %w", err)
+		}
+		cd, ok := d.(proxy.ContextDialer)
+		if !ok {
+			return errors.New("kube: kubeconfig proxy-url: SOCKS5 dialer has no context support")
+		}
+		tr.DialContext = cd.DialContext
+	case "http", "https":
+		tr.Proxy = http.ProxyURL(u)
+	default:
+		return fmt.Errorf("kube: kubeconfig proxy-url scheme %q is not supported", u.Scheme)
+	}
+	return nil
 }
 
 // Get decodes the JSON at an API path (e.g. /api/v1/pods) into out.

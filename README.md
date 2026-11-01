@@ -89,7 +89,7 @@ Every credential is optional; a missing one disables only what needs it.
 | `AUTHENTIK_JWKS_URL`, `AUTHENTIK_ISSUER`, `AUTHENTIK_AUDIENCE`, `OPERATOR_GROUP` | JWT identity mode (preferred) |
 | `PROXY_SECRET_FILE`, `OPERATOR_GROUP` | proxy shared-secret identity mode (fallback) |
 | `FRANK_UPDATER_TELEGRAM_BOT_TOKEN`, `_CHAT_ID`, `_SECURITY_THREAD_ID` | the derio.net group's `#security` topic |
-| `HOP_KUBECONFIG` | read-only Hop kubeconfig (tailnet) |
+| `HOP_KUBECONFIG` | read-only Hop kubeconfig (tailnet). The cluster's `proxy-url` is honoured: `socks5://` / `socks5h://` (e.g. the userspace tailscale sidecar at `socks5://localhost:1055`) dial through a SOCKS5 dialer, `http(s)://` sets the transport proxy; TLS verification against the kubeconfig's CA is unchanged. An invalid or unsupported `proxy-url` refuses the kubeconfig and an unreachable proxy fails the read — never a direct connection. Environment proxy variables are ignored |
 | `VICTORIALOGS_URL` | where hop-scan results are read |
 | `OMNI_STATUS_FILE` | running Omni version |
 | `SESSION_IMAGE`, `SESSION_SECRET_DIR`, `SESSION_API_URL`, `RUNS_FR_URL` | sessions |
