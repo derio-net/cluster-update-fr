@@ -27,7 +27,10 @@ type fakeForge struct {
 	prs         []forge.PR
 	bodies      map[int]string
 	reverts     []string
-	issue       forge.Issue
+	// changedSince makes RestoreFiles report a later change (sec2-7).
+	changedSince    bool
+	deletedBranches []string
+	issue           forge.Issue
 }
 
 func (f *fakeForge) Merge(_ context.Context, n int, sha string) (string, error) {
@@ -57,10 +60,17 @@ func (f *fakeForge) CreatePR(_ context.Context, title, head, base, body string) 
 func (f *fakeForge) ParentOf(_ context.Context, sha string) (string, error) {
 	return "parent-of-" + sha, nil
 }
-func (f *fakeForge) RestoreFiles(_ context.Context, branch, ref string, files []string, _ string) error {
+func (f *fakeForge) RestoreFiles(_ context.Context, branch, ref, since string, files []string, _ string) error {
+	if f.changedSince {
+		return forge.ErrRevertConflict
+	}
 	for _, p := range files {
 		f.reverts = append(f.reverts, branch+"@"+ref+":"+p)
 	}
+	return nil
+}
+func (f *fakeForge) DeleteBranch(_ context.Context, b string) error {
+	f.deletedBranches = append(f.deletedBranches, b)
 	return nil
 }
 func (f *fakeForge) FindIssue(context.Context, string) (forge.Issue, error) { return f.issue, nil }
@@ -360,6 +370,16 @@ func TestRevert(t *testing.T) {
 	}
 	if f.prs[0].HeadRef != f.branches[0] || l.events[0].Action != "revert-opened" || l.events[0].Item != "pr-7" || l.events[0].PR != 100 {
 		t.Fatalf("pr %+v events %+v", f.prs, l.events)
+	}
+	// sec2-7: a file changed after the merge refuses the revert; no PR is
+	// opened and the empty branch is removed.
+	f2 := &fakeForge{changedSince: true}
+	e2 := newEngine(f2, newLedger(), &now, emptyInv())
+	if _, _, err := e2.Revert(context.Background(), forge.PR{Number: 8, MergeCommitSHA: "m8"}, []string{"apps/x/values.yaml"}, "pr-8", "derio"); !errors.Is(err, forge.ErrRevertConflict) {
+		t.Fatalf("revert over a later change: %v", err)
+	}
+	if len(f2.prs) != 0 || len(f2.deletedBranches) != 1 {
+		t.Fatalf("prs %v, deleted %v", f2.prs, f2.deletedBranches)
 	}
 }
 

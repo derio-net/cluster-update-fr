@@ -282,9 +282,16 @@ func contentsPath(p string) string {
 }
 
 type content struct {
-	SHA     string `json:"sha"`
-	Content string `json:"content"`
+	Type     string `json:"type"`
+	Encoding string `json:"encoding"`
+	SHA      string `json:"sha"`
+	Content  string `json:"content"`
 }
+
+// ErrRevertConflict: a file changed on the branch after the merge being
+// reverted; restoring the parent's content would silently undo that later
+// change, so the revert must be done by hand.
+var ErrRevertConflict = errors.New("forge: file changed after the merge; revert it by hand")
 
 func (g *GitHub) content(ctx context.Context, p, ref string) (content, bool, error) {
 	var c content
@@ -292,14 +299,39 @@ func (g *GitHub) content(ctx context.Context, p, ref string) (content, bool, err
 	if errors.Is(err, ErrNotFound) {
 		return content{}, false, nil
 	}
-	return c, err == nil, err
+	if err != nil {
+		return content{}, false, err
+	}
+	// Only a plain file with base64 content is ever restored: a directory
+	// listing, symlink or submodule answer is refused, not interpreted.
+	if c.Type != "file" || c.Encoding != "base64" || c.SHA == "" {
+		return content{}, false, fmt.Errorf("forge: %s at %.12s is %q/%q, not a base64 file", p, ref, c.Type, c.Encoding)
+	}
+	return c, true, nil
 }
 
 // RestoreFiles commits, on branch, each file's content as it is at ref —
 // a file absent at ref is deleted — through the contents API, so every
 // commit is made (and signed) by GitHub for the console's App. One commit
 // per file; a file already equal to ref is left alone.
-func (g *GitHub) RestoreFiles(ctx context.Context, branch, ref string, files []string, message string) error {
+//
+// Before writing anything, every file on branch must still be exactly as
+// the reverted merge (unchangedSince) left it; otherwise ErrRevertConflict
+// and nothing is written (sec2-7).
+func (g *GitHub) RestoreFiles(ctx context.Context, branch, ref, unchangedSince string, files []string, message string) error {
+	for _, p := range files {
+		atMerge, inMerge, err := g.content(ctx, p, unchangedSince)
+		if err != nil {
+			return err
+		}
+		cur, onBranch, err := g.content(ctx, p, branch)
+		if err != nil {
+			return err
+		}
+		if inMerge != onBranch || (inMerge && atMerge.SHA != cur.SHA) {
+			return fmt.Errorf("%w: %s", ErrRevertConflict, p)
+		}
+	}
 	for _, p := range files {
 		want, atRef, err := g.content(ctx, p, ref)
 		if err != nil {

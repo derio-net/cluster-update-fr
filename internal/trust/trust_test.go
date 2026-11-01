@@ -295,6 +295,27 @@ func TestSessionBranchPrefixCannotCollide(t *testing.T) {
 	}
 }
 
+// sec2-7: a revert may touch a sensitive file wholesale only when the
+// reverted PR was a session PR; otherwise only its targetRevision line.
+func TestRevertScopeSensitiveOnlyForSessionPRs(t *testing.T) {
+	ctx := context.Background()
+	pr := goodPR(9)
+	pr.Author, pr.HeadRef = console, engine.RevertBranchPrefix+"7-20261031-100000"
+	files := []string{"apps/root/templates/grafana.yaml"}
+	a := api(9, pr, []forge.Commit{signed("head", console, "web-flow")}, files)
+	a.patches = map[int]map[string]forge.FilePatch{9: {"apps/root/templates/grafana.yaml": {Status: "modified", Patch: "-  syncPolicy: {}\n+  syncPolicy: {automated: {prune: true}}"}}}
+	if err := cfg().Check(ctx, a, pr, RevertScope(7, files, false)); err == nil {
+		t.Fatal("a non-session revert rewrote a sensitive file beyond targetRevision")
+	}
+	if err := cfg().Check(ctx, a, pr, RevertScope(7, files, true)); err != nil {
+		t.Fatalf("a session-path revert restores its own sensitive file: %v", err)
+	}
+	a.patches[9]["apps/root/templates/grafana.yaml"] = forge.FilePatch{Status: "modified", Patch: "-    targetRevision: 8.5.2\n+    targetRevision: 8.5.1"}
+	if err := cfg().Check(ctx, a, pr, RevertScope(7, files, false)); err != nil {
+		t.Fatalf("reverting a chart bump's targetRevision: %v", err)
+	}
+}
+
 func TestOSAndOmniScopes(t *testing.T) {
 	ctx := context.Background()
 	pr := goodPR(7)

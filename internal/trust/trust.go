@@ -97,9 +97,20 @@ func SessionScope(upgradeID string, it engine.Item) Scope {
 
 // RevertScope is where a revert PR may land: exactly the files the reverted
 // PR changed, on the console's revert prefix for that PR.
-func RevertScope(revertedPR int, files []string) Scope {
-	return Scope{Prefixes: append([]string(nil), files...), Sensitive: append([]string(nil), files...), Known: len(files) > 0,
+//
+// Sensitive paths are granted only when the reverted PR came from the
+// session path (where it was allowed to touch them); otherwise a sensitive
+// file may change only on its targetRevision line, exactly as the reverted
+// auto/batch PR could (sec2-7).
+func RevertScope(revertedPR int, files []string, sessionPath bool) Scope {
+	s := Scope{Prefixes: append([]string(nil), files...), Known: len(files) > 0,
 		BranchPrefix: fmt.Sprintf("%s%d-", engine.RevertBranchPrefix, revertedPR)}
+	if sessionPath {
+		s.Sensitive = append([]string(nil), files...)
+	} else {
+		s.TargetRevisionOnly = append([]string(nil), files...)
+	}
+	return s
 }
 
 var targetRevisionLine = regexp.MustCompile(`^[+-][ \t]*targetRevision:[ \t]*["']?[A-Za-z0-9._+-]+["']?[ \t]*$`)

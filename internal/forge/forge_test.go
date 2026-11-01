@@ -165,18 +165,25 @@ func TestStatusesIssuesAndRevert(t *testing.T) {
 func TestRestoreFilesAndParent(t *testing.T) {
 	srv, calls := fake(t, map[string]string{
 		"GET /repos/derio-net/frank/commits/m7":                                                  `{"sha":"m7","parents":[{"sha":"p7"}]}`,
-		"GET /repos/derio-net/frank/contents/apps/x/values.yaml?ref=p7":                          `{"sha":"blob-old","content":"b2xk\nCg==","encoding":"base64"}`,
-		"GET /repos/derio-net/frank/contents/apps/x/values.yaml?ref=cluster-update%2Frevert-7-x": `{"sha":"blob-x","content":"bmV3Cg==","encoding":"base64"}`,
+		"GET /repos/derio-net/frank/contents/apps/x/values.yaml?ref=p7":                          `{"type":"file","sha":"blob-old","content":"b2xk\nCg==","encoding":"base64"}`,
+		"GET /repos/derio-net/frank/contents/apps/x/values.yaml?ref=m7":                          `{"type":"file","sha":"blob-x","content":"bmV3Cg==","encoding":"base64"}`,
+		"GET /repos/derio-net/frank/contents/apps/x/values.yaml?ref=cluster-update%2Frevert-7-x": `{"type":"file","sha":"blob-x","content":"bmV3Cg==","encoding":"base64"}`,
 		"PUT /repos/derio-net/frank/contents/apps/x/values.yaml":                                 `{"content":{}}`,
-		"GET /repos/derio-net/frank/contents/apps/y/new.yaml?ref=cluster-update%2Frevert-7-x":    `{"sha":"blob-y","content":"eQo=","encoding":"base64"}`,
+		"GET /repos/derio-net/frank/contents/apps/y/new.yaml?ref=m7":                             `{"type":"file","sha":"blob-y","content":"eQo=","encoding":"base64"}`,
+		"GET /repos/derio-net/frank/contents/apps/y/new.yaml?ref=cluster-update%2Frevert-7-x":    `{"type":"file","sha":"blob-y","content":"eQo=","encoding":"base64"}`,
 		"DELETE /repos/derio-net/frank/contents/apps/y/new.yaml":                                 `{}`,
+		// changed after the merge (sec2-7)
+		"GET /repos/derio-net/frank/contents/apps/z/later.yaml?ref=m7":                          `{"type":"file","sha":"blob-z1","content":"eg==","encoding":"base64"}`,
+		"GET /repos/derio-net/frank/contents/apps/z/later.yaml?ref=cluster-update%2Frevert-7-x": `{"type":"file","sha":"blob-z2","content":"ejI=","encoding":"base64"}`,
+		// a directory listing, not a file
+		"GET /repos/derio-net/frank/contents/apps/d?ref=m7": `{"type":"dir","sha":"t1"}`,
 	})
 	g := gh(srv, "tkn")
 	ctx := context.Background()
 	if p, err := g.ParentOf(ctx, "m7"); err != nil || p != "p7" {
 		t.Fatalf("ParentOf = %q %v", p, err)
 	}
-	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", []string{"apps/x/values.yaml"}, "Revert #7"); err != nil {
+	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", "m7", []string{"apps/x/values.yaml"}, "Revert #7"); err != nil {
 		t.Fatal(err)
 	}
 	var put map[string]any
@@ -189,12 +196,26 @@ func TestRestoreFilesAndParent(t *testing.T) {
 		t.Fatalf("PUT body = %v", put)
 	}
 	// Absent at the parent, present on the branch: deleted.
-	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", []string{"apps/y/new.yaml"}, "Revert #7"); err != nil {
+	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", "m7", []string{"apps/y/new.yaml"}, "Revert #7"); err != nil {
 		t.Fatal(err)
 	}
 	last := (*calls)[len(*calls)-1]
 	if last.Method != "DELETE" || last.Body["sha"] != "blob-y" || last.Body["branch"] != "cluster-update/revert-7-x" {
 		t.Fatalf("delete = %+v", last)
+	}
+	// sec2-7: a file changed after the merge refuses the whole revert, and
+	// nothing is written; a non-file answer is refused too.
+	n := len(*calls)
+	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", "m7", []string{"apps/x/values.yaml", "apps/z/later.yaml"}, "Revert #7"); !errors.Is(err, ErrRevertConflict) {
+		t.Fatalf("later change: %v", err)
+	}
+	for _, c := range (*calls)[n:] {
+		if c.Method != "GET" {
+			t.Fatalf("a refused revert wrote: %+v", c)
+		}
+	}
+	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", "m7", []string{"apps/d"}, "Revert #7"); err == nil {
+		t.Fatal("a directory answer was accepted as a file")
 	}
 }
 

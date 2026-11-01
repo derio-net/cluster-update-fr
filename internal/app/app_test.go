@@ -230,7 +230,7 @@ func (g *fakeGitHub) DeleteBranch(_ context.Context, b string) error {
 func (g *fakeGitHub) ParentOf(_ context.Context, sha string) (string, error) {
 	return "parent-" + sha, nil
 }
-func (g *fakeGitHub) RestoreFiles(_ context.Context, branch, _ string, files []string, _ string) error {
+func (g *fakeGitHub) RestoreFiles(_ context.Context, branch, _, _ string, files []string, _ string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.restored == nil {

@@ -87,7 +87,9 @@ type Forge interface {
 	// ParentOf returns a commit's first parent; RestoreFiles commits, on
 	// branch, each file's content at ref (deleting files absent there).
 	ParentOf(ctx context.Context, sha string) (string, error)
-	RestoreFiles(ctx context.Context, branch, ref string, files []string, message string) error
+	// Every file on branch must still be as unchangedSince left it.
+	RestoreFiles(ctx context.Context, branch, ref, unchangedSince string, files []string, message string) error
+	DeleteBranch(ctx context.Context, branch string) error
 }
 
 // Item is one update candidate (an open Renovate or batch PR).
@@ -581,7 +583,9 @@ func (e *Engine) Revert(ctx context.Context, merged forge.PR, files []string, id
 		return 0, "", err
 	}
 	msg := fmt.Sprintf("Revert #%d: %s", merged.Number, merged.Title)
-	if err := e.Forge.RestoreFiles(ctx, branch, parent, files, msg); err != nil {
+	if err := e.Forge.RestoreFiles(ctx, branch, parent, merged.MergeCommitSHA, files, msg); err != nil {
+		// Nothing was written: remove the empty branch again.
+		_ = e.Forge.DeleteBranch(ctx, branch)
 		return 0, "", err
 	}
 	pr, err := e.Forge.CreatePR(ctx, "Revert: "+merged.Title, branch, "main",

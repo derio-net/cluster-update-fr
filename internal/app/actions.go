@@ -136,7 +136,7 @@ func (a *App) MergeRevert(ctx context.Context, id, by string) error {
 		return err
 	}
 	a.eng(a.policy())
-	sha, err := a.guard.MergeWithScope(ctx, rp.Number, rp.HeadSHA, trust.RevertScope(u.PR, files))
+	sha, err := a.guard.MergeWithScope(ctx, rp.Number, rp.HeadSHA, trust.RevertScope(u.PR, files, u.Path == frankrepo.PathSession))
 	if err != nil {
 		a.Store.AddEvent(store.Event{Update: id, Action: "merge-refused", By: by, PR: rp.Number, Reason: scrub.String(err.Error())})
 		_ = a.Store.Save()
