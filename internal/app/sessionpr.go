@@ -54,9 +54,19 @@ func ParseSessionPRKey(k string) (string, int, error) {
 	return k[:i], n, nil
 }
 
-// blobPROwners records, forever, which session first asked for each PR: a
-// PR belongs to the session that opened (and first requested) it.
-const blobPROwners = "session-pr-owners"
+// branchSession is the session a head branch belongs to ("" if none):
+// cluster-update/session-<id>/<topic>.
+func branchSession(head string) string {
+	rest, ok := strings.CutPrefix(head, engine.SessionBranchPrefix)
+	if !ok {
+		return ""
+	}
+	id, _, ok := strings.Cut(rest, "/")
+	if !ok {
+		return ""
+	}
+	return id
+}
 
 // ErrBadRequest is a malformed session API call.
 var ErrBadRequest = errors.New("app: bad request")
@@ -142,24 +152,15 @@ func (a *App) RequestMerge(ctx context.Context, id, token string, pr int) error 
 	if err != nil {
 		return err
 	}
-	// A PR belongs to the first session that asked for it (sec2-3/4).
-	var owner string
-	_ = store.UpdateJSON(a.Store, blobPROwners, func(m *map[string]string) error {
-		if *m == nil {
-			*m = map[string]string{}
-		}
-		k := strconv.Itoa(pr)
-		if cur, ok := (*m)[k]; ok {
-			owner = cur
-			return nil
-		}
-		(*m)[k], owner = id, id
-		return nil
-	})
-	if owner != id {
-		a.Store.AddEvent(store.Event{Update: id, Action: "session-merge-refused", By: "session", PR: pr, Reason: "PR belongs to session " + owner})
+	// A PR belongs to the session whose branch it is on: the head branch
+	// cluster-update/session-<id>/… names exactly one session (sec2-3), and
+	// the trust check below verifies it against THIS session's prefix. No
+	// first-come claim exists, so no session can block another's PR.
+	if owner := branchSession(p.HeadRef); owner != id {
+		a.Store.AddEvent(store.Event{Update: id, Action: "session-merge-refused", By: "session", PR: pr,
+			Reason: fmt.Sprintf("PR #%d is on another session's branch", pr)})
 		_ = a.Store.Save()
-		return fmt.Errorf("%w: PR #%d was requested by session %s, not this one", ErrBadRequest, pr, owner)
+		return fmt.Errorf("%w: PR #%d is not on this session's branch prefix %s%s/", ErrBadRequest, pr, engine.SessionBranchPrefix, id)
 	}
 	a.eng(a.policy())
 	checkErr := a.trustConfig().Check(ctx, a.GitHub, p, scope)

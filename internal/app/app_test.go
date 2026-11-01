@@ -578,6 +578,13 @@ func TestSessionPRMergeRoute(t *testing.T) {
 				t.Fatalf("request-merge: %v", err)
 			}
 			v := a.View()
+			if c.wantRefusalIn == "prefix" {
+				// Not this session's branch: refused outright, nothing recorded.
+				if !strings.Contains(err.Error(), "branch") || len(v.SessionPRs) != 0 {
+					t.Fatalf("another session's branch: err=%v listed=%+v", err, v.SessionPRs)
+				}
+				return
+			}
 			if len(v.SessionPRs) != 1 || v.SessionPRs[0].PR != n || (v.SessionPRs[0].Untrusted == "") != c.wantTrusted {
 				t.Fatalf("listed = %+v", v.SessionPRs)
 			}
@@ -806,17 +813,26 @@ func TestSessionPRRequestsAreOwnedAndBounded(t *testing.T) {
 		}
 		return a, gh, n
 	}
-	t.Run("another session cannot take over a PR", func(t *testing.T) {
+	t.Run("another session cannot take over or block a PR", func(t *testing.T) {
 		a, _, n := setup(t)
+		// Reset: B asks for A's PR FIRST, before A ever does.
+		_ = store.UpdateJSON(a.Store, blobSessionPRs, func(m *map[string]SessionPR) error { *m = nil; return nil })
 		if _, _, err := a.StartSession(context.Background(), other, "derio"); err != nil {
 			t.Fatal(err)
 		}
 		err := a.RequestMerge(context.Background(), other, a.Launcher.StepToken(other), n)
-		if !errors.Is(err, ErrBadRequest) || !strings.Contains(err.Error(), id) {
-			t.Fatalf("second session's request for the same PR: %v", err)
+		if !errors.Is(err, ErrBadRequest) || !strings.Contains(err.Error(), "branch") {
+			t.Fatalf("another session's request for A's PR: %v", err)
 		}
-		if prs := a.View().SessionPRs; len(prs) != 1 || prs[0].Session != id {
-			t.Fatalf("the first session's request was overwritten: %+v", prs)
+		if prs := a.View().SessionPRs; len(prs) != 0 {
+			t.Fatalf("a refused request was recorded: %+v", prs)
+		}
+		// A's own request still succeeds: nothing was claimed by B.
+		if err := a.RequestMerge(context.Background(), id, a.Launcher.StepToken(id), n); err != nil {
+			t.Fatalf("the owner's request after B's attempt: %v", err)
+		}
+		if prs := a.View().SessionPRs; len(prs) != 1 || prs[0].Session != id || prs[0].Untrusted != "" {
+			t.Fatalf("owner's request = %+v", prs)
 		}
 	})
 	t.Run("ended session", func(t *testing.T) {
