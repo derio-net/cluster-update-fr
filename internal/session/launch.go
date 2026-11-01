@@ -77,11 +77,18 @@ type Record struct {
 	StepSince    time.Time `json:"step_since,omitempty"`
 	Warned       bool      `json:"warned"`
 	TokenHash    string    `json:"token_hash"`
+	// What was created, recorded right after create: an attach proves the
+	// live pod and Secrets are still exactly these objects.
+	Image      string            `json:"image,omitempty"`
+	PodUID     string            `json:"pod_uid,omitempty"`
+	SecretUIDs map[string]string `json:"secret_uids,omitempty"`
 }
 
-// Ended reports a session the lifecycle ended.
+// Ended reports a session the lifecycle ended. Alarm marks a forced end (hard
+// ceiling, per-step cap) that must be raised in #security.
 type Ended struct {
 	ID, Outcome string
+	Alarm       bool
 }
 
 // Launcher starts, tracks and ends sessions.
@@ -95,12 +102,15 @@ type Launcher struct {
 	Now         func() time.Time
 	IdleTimeout time.Duration
 	MaxLifetime time.Duration
+	HardCeiling time.Duration // ends the session even mid-step (0 = off)
+	StepCap     time.Duration // ends a session whose one step runs longer (0 = off)
 
 	startMu  sync.Mutex // serialises Start and the lifecycle Tick
 	mu       sync.Mutex
 	sets     map[string]*scrub.Set
 	tokens   map[string]string // in memory only; the store keeps a hash
 	warnings []string
+	alarms   []string
 }
 
 const sessionBlob = "sessions"
@@ -191,27 +201,24 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 		return Record{}, false, err
 	}
 	pod := PodName(req.UpgradeID)
-	var existing struct{}
+	var existing livePod
 	if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "pods", pod), &existing); err == nil {
-		if rec, ok := l.Get(req.UpgradeID); ok && rec.TokenHash != "" {
+		// Attach ONLY to the pod this console created for this id: a
+		// write-ahead record must exist, the pod's UID must be the one
+		// recorded at create time, and its labels and security-relevant spec
+		// (image, ServiceAccount, the Secrets it mounts, their UIDs) must be
+		// what podSpec built. Anything else is never handed to the operator.
+		rec, ok := l.Get(req.UpgradeID)
+		why := "no write-ahead record with a pod UID for this upgrade id"
+		if ok && rec.TokenHash != "" && rec.PodUID != "" {
+			why = l.verifyOwned(ctx, rec, existing)
+		}
+		if why == "" {
 			l.Touch(req.UpgradeID)
 			rec, _ = l.Get(req.UpgradeID)
 			return rec, false, nil
 		}
-		// A pod with no record (the console restarted between the create
-		// and the record, or the state was lost): the step token must be
-		// recovered from its own creds Secret, or the session cannot report
-		// steps and is ended instead of running unaccounted for.
-		rec, err := l.adopt(ctx, req, target, pod)
-		if err != nil {
-			_ = l.cleanup(ctx, pod)
-			_ = l.update(func(m map[string]Record) error { delete(m, req.UpgradeID); return nil })
-			locks.Release(target, req.UpgradeID)
-			_ = l.Store.Save()
-			l.Store.AddEvent(store.Event{Update: req.UpgradeID, Action: "session-ended", By: "launcher", Reason: "found a session pod with no record: " + err.Error()})
-			return Record{}, false, fmt.Errorf("session: pod %s had no record and could not be adopted (%v); it was ended — start again", pod, err)
-		}
-		return rec, false, nil
+		return Record{}, false, l.refuseUnknown(ctx, req.UpgradeID, target, pod, existing, why)
 	} else if !kube.IsNotFound(err) {
 		release()
 		return Record{}, false, err
@@ -225,7 +232,7 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	sum := sha256.Sum256([]byte(token))
 	now := l.now()
 	rec := Record{ID: req.UpgradeID, Type: req.Type, Target: target, Pod: pod, Cluster: req.Cluster, App: req.App,
-		StartedAt: now, LastActivity: now, TokenHash: hex.EncodeToString(sum[:])}
+		StartedAt: now, LastActivity: now, TokenHash: hex.EncodeToString(sum[:]), Image: l.Image, SecretUIDs: map[string]string{}}
 	// Write-ahead: the record (and its token hash) is on disk before the pod.
 	if err := l.update(func(m map[string]Record) error { m[rec.ID] = rec; return nil }); err != nil {
 		release()
@@ -281,7 +288,26 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 		if !adopted {
 			created = append(created, struct{ res, name string }{obj.res, obj.name})
 		}
+		// Record the UID of exactly the object that now carries the name, so
+		// a later attach can prove it is still the same one.
+		var got struct {
+			Metadata kube.Meta `json:"metadata"`
+		}
+		if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, obj.res, obj.name), &got); err != nil || got.Metadata.UID == "" {
+			rollback()
+			return Record{}, false, fmt.Errorf("session: %s/%s created but its UID is unreadable: %v", obj.res, obj.name, err)
+		}
+		if obj.res == "pods" {
+			rec.PodUID = got.Metadata.UID
+		} else {
+			rec.SecretUIDs[obj.name] = got.Metadata.UID
+		}
 	}
+	if err := l.update(func(m map[string]Record) error { m[rec.ID] = rec; return nil }); err != nil {
+		rollback()
+		return Record{}, false, err
+	}
+	_ = l.Store.Save()
 	l.mu.Lock()
 	if l.sets == nil {
 		l.sets, l.tokens = map[string]*scrub.Set{}, map[string]string{}
@@ -341,7 +367,9 @@ func (l *Launcher) createOwned(ctx context.Context, id, res, name string, conten
 		ours = true
 	}
 	if !ours {
-		l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", Reason: res + "/" + name + " exists and is not this session's"})
+		msg := fmt.Sprintf("session %s: %s/%s exists and is not this session's; start refused", id, res, name)
+		l.alarm(msg)
+		l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", Reason: msg})
 		return false, fmt.Errorf("%w: %s/%s", ErrForeignObject, res, name)
 	}
 	if content != nil {
@@ -366,47 +394,113 @@ func (l *Launcher) createOwned(ctx context.Context, id, res, name string, conten
 	return false, l.Kube.Create(ctx, l.Namespace, res, body)
 }
 
-// adopt rebuilds the record of a running pod that has none, from its creds
-// Secret: the Secret must be the console's (managed-by label) and this
-// session's (run-id label), and must hold a step token. The token hash is
-// recomputed from it; nothing about the pod is trusted otherwise.
-func (l *Launcher) adopt(ctx context.Context, req Request, target, pod string) (Record, error) {
-	var sec struct {
-		Metadata kube.Meta         `json:"metadata"`
-		Data     map[string]string `json:"data"`
+// livePod is the part of a live pod the attach check compares.
+type livePod struct {
+	Metadata kube.Meta `json:"metadata"`
+	Spec     struct {
+		ServiceAccountName string `json:"serviceAccountName"`
+		Containers         []struct {
+			Image string `json:"image"`
+		} `json:"containers"`
+		InitContainers []json.RawMessage `json:"initContainers"`
+		Volumes        []struct {
+			Name   string `json:"name"`
+			Secret *struct {
+				SecretName string `json:"secretName"`
+			} `json:"secret"`
+		} `json:"volumes"`
+	} `json:"spec"`
+	Status struct {
+		Phase string `json:"phase"`
+	} `json:"status"`
+}
+
+// verifyOwned returns "" when live is exactly the pod this console created
+// for rec, else the first mismatch.
+func (l *Launcher) verifyOwned(ctx context.Context, rec Record, live livePod) string {
+	m := live.Metadata
+	switch {
+	case m.UID != rec.PodUID:
+		return fmt.Sprintf("pod UID %q is not the recorded %q (the pod was replaced)", m.UID, rec.PodUID)
+	case m.Labels[kube.ManagedByLabel] != kube.ManagedBy || m.Labels[LabelRunID] != rec.ID || m.Labels[LabelType] != rec.Type:
+		return "pod labels are not this session's"
+	case len(live.Spec.Containers) != 1 || len(live.Spec.InitContainers) != 0 || live.Spec.Containers[0].Image != rec.Image:
+		return "pod containers/image differ from what the console created"
 	}
-	if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "secrets", SecretName(req.UpgradeID)), &sec); err != nil {
-		return Record{}, fmt.Errorf("creds Secret unreadable: %w", err)
+	wantSA := ""
+	if typeSA[rec.Type] {
+		wantSA = "upgrade-session-" + rec.Type
 	}
-	if sec.Metadata.Labels[kube.ManagedByLabel] != kube.ManagedBy || sec.Metadata.Labels[LabelRunID] != req.UpgradeID ||
-		sec.Metadata.Annotations[AnnotationOwner] != req.UpgradeID {
-		return Record{}, errors.New("creds Secret is not this session's")
+	if sa := live.Spec.ServiceAccountName; sa != wantSA && !(wantSA == "" && sa == "default") {
+		return fmt.Sprintf("pod ServiceAccount %q is not %q", sa, wantSA)
 	}
-	decoded := map[string]string{}
-	for k, v := range sec.Data {
-		b, err := base64.StdEncoding.DecodeString(v)
-		if err != nil {
-			return Record{}, errors.New("creds Secret is not decodable")
+	wantVol := map[string]string{"credentials": SecretName(rec.ID), "brief": BriefName(rec.ID)}
+	seen := 0
+	for _, v := range live.Spec.Volumes {
+		if v.Secret == nil {
+			continue
 		}
-		decoded[k] = string(b)
+		if wantVol[v.Name] != v.Secret.SecretName {
+			return fmt.Sprintf("pod mounts Secret %q as volume %q", v.Secret.SecretName, v.Name)
+		}
+		seen++
 	}
-	if contentHash(decoded) != sec.Metadata.Annotations[AnnotationContentHash] {
-		return Record{}, errors.New("creds Secret content does not match the hash the console wrote")
+	if seen != len(wantVol) {
+		return "pod does not mount exactly the session's two Secrets"
 	}
-	tok := []byte(decoded[StepTokenKey])
-	if len(tok) == 0 {
-		return Record{}, errors.New("creds Secret holds no step token")
+	for name, uid := range rec.SecretUIDs {
+		var s struct {
+			Metadata kube.Meta `json:"metadata"`
+		}
+		if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "secrets", name), &s); err != nil {
+			return "Secret " + name + " unreadable: " + scrub.String(err.Error())
+		}
+		if s.Metadata.UID != uid {
+			return fmt.Sprintf("Secret %s UID %q is not the recorded %q (it was replaced)", name, s.Metadata.UID, uid)
+		}
 	}
-	sum := sha256.Sum256(tok)
-	now := l.now()
-	rec := Record{ID: req.UpgradeID, Type: req.Type, Target: target, Pod: pod, Cluster: req.Cluster, App: req.App,
-		StartedAt: now, LastActivity: now, TokenHash: hex.EncodeToString(sum[:])}
-	if err := l.update(func(m map[string]Record) error { m[rec.ID] = rec; return nil }); err != nil {
-		return Record{}, err
+	if len(rec.SecretUIDs) != len(wantVol) {
+		return "the record does not hold both Secret UIDs"
 	}
+	return ""
+}
+
+// refuseUnknown handles a pod under a session's name that the console cannot
+// prove is its own: never attached; deleted (with its Secrets) when it
+// carries our managed-by label, else left in place and refused; always
+// alarmed in #security. The record and lock for the id are dropped.
+func (l *Launcher) refuseUnknown(ctx context.Context, id, target, pod string, live livePod, why string) error {
+	action := "refused and left in place (not created by the console)"
+	if live.Metadata.Labels[kube.ManagedByLabel] == kube.ManagedBy {
+		action = "deleted with its Secrets"
+		if err := l.cleanup(ctx, pod); err != nil {
+			action = "could NOT be deleted: " + scrub.String(err.Error())
+		}
+	}
+	_ = l.update(func(m map[string]Record) error { delete(m, id); return nil })
+	Locks{Store: l.Store}.Release(target, id)
 	_ = l.Store.Save()
-	l.Store.AddEvent(store.Event{Update: req.UpgradeID, Action: "session-adopted", Reason: "rebuilt the record of running pod " + pod + " from its creds Secret"})
-	return rec, nil
+	msg := fmt.Sprintf("session %s: pod %s is not the console's own (%s); %s", id, pod, why, action)
+	l.alarm(msg)
+	l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", By: "launcher", Reason: msg})
+	return fmt.Errorf("%w: %s", ErrForeignObject, msg)
+}
+
+// alarm queues a #security alarm for the app to send.
+func (l *Launcher) alarm(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.alarms = append(l.alarms, scrub.String(msg))
+}
+
+// Alarms returns (and clears) pending security alarms: forced ends at the
+// hard ceiling or step cap, and refused foreign session objects.
+func (l *Launcher) Alarms() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.alarms
+	l.alarms = nil
+	return a
 }
 
 func randomToken() (string, error) {

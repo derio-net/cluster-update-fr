@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/derio-net/cluster-update-fr/internal/kube"
 	"github.com/derio-net/cluster-update-fr/internal/scrub"
@@ -77,13 +79,24 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 	now := l.now()
 	var ended []Ended
 	for _, r := range l.records() {
-		var pod struct {
-			Status struct {
-				Phase string `json:"phase"`
-			} `json:"status"`
+		// The hard ceiling and the per-step cap end a session even mid-step:
+		// a steered agent reporting a step as running forever must not keep
+		// its credentials (c1s-r1). Checked before anything else, and they
+		// alarm in #security.
+		if l.HardCeiling > 0 && now.Sub(r.StartedAt) > l.HardCeiling {
+			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: hard ceiling %s reached (step %q reported running: %v)", l.HardCeiling, r.StepName, r.StepRunning)))
+			continue
 		}
+		if r.StepRunning && l.StepCap > 0 && now.Sub(r.StepSince) > l.StepCap {
+			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: step %q ran past the %s per-step cap", r.StepName, l.StepCap)))
+			continue
+		}
+		var pod livePod
 		err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "pods", r.Pod), &pod)
 		switch {
+		case err == nil && r.PodUID != "" && pod.Metadata.UID != r.PodUID:
+			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: the session pod was replaced (UID %q, recorded %q)", pod.Metadata.UID, r.PodUID)))
+			continue
 		case kube.IsNotFound(err):
 			ended = append(ended, l.endFor(ctx, r, "needs you: the session pod disappeared"))
 			continue
@@ -118,16 +131,29 @@ func (l *Launcher) endFor(ctx context.Context, r Record, outcome string) Ended {
 	return Ended{ID: r.ID, Outcome: outcome}
 }
 
+// endAlarm ends a session forcibly and marks the end as a security alarm.
+// If the cleanup fails (API unreachable) the record stays and the next tick
+// tries again; the alarm says so.
+func (l *Launcher) endAlarm(ctx context.Context, r Record, outcome string) Ended {
+	e := Ended{ID: r.ID, Outcome: outcome, Alarm: true}
+	if err := l.End(ctx, r.ID, outcome, "lifecycle", ""); err != nil {
+		e.Outcome += " — CLEANUP INCOMPLETE: " + scrub.String(err.Error())
+	}
+	l.alarm("session " + r.ID + " " + e.Outcome)
+	return e
+}
+
 // End deletes the session's pod and Secrets, releases its lock, and keeps
 // the outcome and the scrubbed transcript in History. Idempotent.
 func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) error {
 	rec, ok := l.Get(id)
 	set := l.Scrubber(id)
-	if err := l.cleanup(ctx, PodName(id)); err != nil {
-		return err
+	cerr := l.cleanup(ctx, PodName(id))
+	if cerr != nil && !errors.Is(cerr, kube.ErrForbiddenWrite) {
+		return cerr // API trouble: keep the record, retry next tick
 	}
 	if !ok {
-		return nil
+		return cerr
 	}
 	Locks{Store: l.Store}.Release(rec.Target, id)
 	_ = l.update(func(m map[string]Record) error { delete(m, id); return nil })
@@ -140,7 +166,7 @@ func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) 
 	delete(l.sets, id)
 	delete(l.tokens, id)
 	l.mu.Unlock()
-	return nil
+	return cerr // a foreign object under the session's name is left and reported
 }
 
 // CleanupPod removes a leftover session pod (and its Secrets) found by
@@ -156,11 +182,24 @@ func (l *Launcher) CleanupPod(ctx context.Context, pod, reason string) error {
 
 // cleanup deletes pod and its Secrets, ignoring what is already gone. The
 // one cleanup path used by End, the lifecycle and reconciliation.
+//
+// An object under the session's name that is not the console's (no
+// managed-by label) is refused by the kube client; cleanup carries on with
+// the rest and returns an error wrapping kube.ErrForbiddenWrite naming it.
 func (l *Launcher) cleanup(ctx context.Context, pod string) error {
+	var foreign []string
 	for _, o := range []struct{ res, name string }{{"pods", pod}, {"secrets", pod + "-creds"}, {"secrets", pod + "-brief"}} {
-		if err := l.Kube.Delete(ctx, l.Namespace, o.res, o.name); err != nil && !kube.IsNotFound(err) {
+		err := l.Kube.Delete(ctx, l.Namespace, o.res, o.name)
+		switch {
+		case err == nil || kube.IsNotFound(err):
+		case errors.Is(err, kube.ErrForbiddenWrite):
+			foreign = append(foreign, o.res+"/"+o.name)
+		default:
 			return err
 		}
+	}
+	if len(foreign) > 0 {
+		return fmt.Errorf("%w: left in place, not the console's: %s", kube.ErrForbiddenWrite, strings.Join(foreign, ", "))
 	}
 	return nil
 }

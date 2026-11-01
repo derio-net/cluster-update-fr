@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,15 +163,17 @@ func (s *fakeSender) Send(_ context.Context, text string) error {
 
 type memKube struct {
 	mu   sync.Mutex
-	objs map[string]bool
+	objs map[string]map[string]any
+	n    int
 }
 
-func (k *memKube) Get(_ context.Context, path string, _ any) error {
+func (k *memKube) Get(_ context.Context, path string, out any) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	parts := strings.Split(path, "/")
-	if k.objs[parts[len(parts)-2]+"/"+parts[len(parts)-1]] {
-		return nil
+	if m, ok := k.objs[parts[len(parts)-2]+"/"+parts[len(parts)-1]]; ok {
+		b, _ := json.Marshal(m)
+		return json.Unmarshal(b, out)
 	}
 	return &kube.APIError{Code: 404}
 }
@@ -178,11 +181,20 @@ func (k *memKube) Create(_ context.Context, _, res string, obj any) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	b, _ := json.Marshal(obj)
-	var m struct {
-		Metadata struct{ Name string } `json:"metadata"`
-	}
+	var m map[string]any
 	_ = json.Unmarshal(b, &m)
-	k.objs[res+"/"+m.Metadata.Name] = true
+	meta := m["metadata"].(map[string]any)
+	k.n++
+	meta["uid"] = fmt.Sprintf("uid-%d", k.n)
+	if sd, ok := m["stringData"].(map[string]any); ok {
+		data := map[string]any{}
+		for key, v := range sd {
+			data[key] = base64.StdEncoding.EncodeToString([]byte(v.(string)))
+		}
+		m["data"] = data
+		delete(m, "stringData")
+	}
+	k.objs[res+"/"+meta["name"].(string)] = m
 	return nil
 }
 func (k *memKube) Delete(_ context.Context, _, res, name string) error {
@@ -208,7 +220,7 @@ func newApp(t *testing.T, now *time.Time, hop bool) (*App, *fakeGitHub, *fakeSen
 		Body: fmt.Sprintf(prBody, "ghcr.io/gethomepage/homepage", "v1.4.0", "v1.4.1"),
 	}}}
 	tg := &fakeSender{}
-	k := &memKube{objs: map[string]bool{}}
+	k := &memKube{objs: map[string]map[string]any{}}
 	nowFn := func() time.Time { return *now }
 	a := &App{Cfg: cfg, Repo: frankrepo.FSSource{Root: "../../testdata/frank"}, Frank: fixtureGetter{}, GitHub: gh, Store: st, Telegram: tg, Now: nowFn,
 		Launcher: &session.Launcher{Kube: k, Store: st, Namespace: "upgrade-sessions", Image: cfg.SessionImage, CredDir: t.TempDir(), Now: nowFn,

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ type fakeKube struct {
 	deletes []string
 	policy  kube.WritePolicy
 	phase   string // pod phase reported by Get
+	uids    int
 }
 
 func newFake() *fakeKube {
@@ -51,6 +53,8 @@ func (f *fakeKube) Create(_ context.Context, ns, res string, obj any) error {
 	if _, ok := f.objects[k]; ok {
 		return &kube.APIError{Code: 409, Reason: "AlreadyExists"}
 	}
+	f.uids++
+	m["metadata"].(map[string]any)["uid"] = fmt.Sprintf("uid-%d", f.uids)
 	f.objects[k] = m
 	f.creates = append(f.creates, k)
 	return nil
@@ -267,27 +271,72 @@ func TestUnrecordedPodWithoutTokenIsNotAttached(t *testing.T) {
 	if h := (Locks{Store: l.Store}).Holder(Target(TypeChartMajor, "frank", "grafana")); h != "" {
 		t.Errorf("lock leaked to %q", h)
 	}
+	if a := l.Alarms(); len(a) != 1 || !strings.Contains(a[0], "not the console's own") {
+		t.Errorf("alarms = %v", a)
+	}
+	if _, ok := k.objects["pods/"+PodName("pr-9")]; !ok {
+		t.Error("an unlabelled pod is not ours to delete; it must be left and reported")
+	}
 }
 
-// After a restart that lost the record, the running pod is adopted with the
-// token hash rebuilt from its own creds Secret, so step reporting keeps
-// working (c1s-r6).
-func TestAttachWithoutRecordRebuildsTheTokenHash(t *testing.T) {
+// Attach proves identity: the live pod must have the UID recorded at
+// create time, our labels, the recorded image/ServiceAccount/Secret mounts,
+// and the Secrets their recorded UIDs. Any mismatch: never attached, the
+// (managed) pod deleted, the record dropped, an alarm raised.
+func TestAttachRefusesAReplacedOrTamperedPod(t *testing.T) {
+	cases := map[string]func(k *fakeKube, id string){
+		"record lost": nil,
+		"different pod UID": func(k *fakeKube, id string) {
+			k.objects["pods/"+PodName(id)]["metadata"].(map[string]any)["uid"] = "uid-planted"
+		},
+		"tampered image": func(k *fakeKube, id string) {
+			c := k.objects["pods/"+PodName(id)]["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+			c["image"] = "evil/shell:latest"
+		},
+		"tampered ServiceAccount": func(k *fakeKube, id string) {
+			k.objects["pods/"+PodName(id)]["spec"].(map[string]any)["serviceAccountName"] = "cluster-admin"
+		},
+		"replaced creds Secret": func(k *fakeKube, id string) {
+			k.objects["secrets/"+SecretName(id)]["metadata"].(map[string]any)["uid"] = "uid-swapped"
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			k := newFake()
+			l := launcher(t, k, &now)
+			if _, _, err := l.Start(context.Background(), req("pr-5", TypeChartMajor, "grafana")); err != nil {
+				t.Fatal(err)
+			}
+			if tamper == nil {
+				_ = l.Store.PutBlob(sessionBlob, map[string]Record{})
+			} else {
+				tamper(k, "pr-5")
+			}
+			_, _, err := l.Start(context.Background(), req("pr-5", TypeChartMajor, "grafana"))
+			if !errors.Is(err, ErrForeignObject) {
+				t.Fatalf("attach after %s: %v", name, err)
+			}
+			if _, ok := l.Get("pr-5"); ok {
+				t.Error("record kept")
+			}
+			if _, ok := k.objects["pods/"+PodName("pr-5")]; ok {
+				t.Error("a managed pod that failed verification must be deleted")
+			}
+			if a := l.Alarms(); len(a) == 0 {
+				t.Error("no #security alarm")
+			}
+		})
+	}
+	// The untouched case still attaches.
 	now := time.Unix(1000, 0)
 	k := newFake()
 	l := launcher(t, k, &now)
-	if _, _, err := l.Start(context.Background(), req("pr-5", TypeChartMajor, "grafana")); err != nil {
+	if _, _, err := l.Start(context.Background(), req("pr-6", TypeChartMajor, "grafana")); err != nil {
 		t.Fatal(err)
 	}
-	tok := l.StepToken("pr-5")
-	_ = l.Store.PutBlob(sessionBlob, map[string]Record{}) // the record is lost
-	l2 := &Launcher{Kube: k, Store: l.Store, Namespace: l.Namespace, Image: l.Image, CredDir: l.CredDir, Now: l.Now}
-	rec, created, err := l2.Start(context.Background(), req("pr-5", TypeChartMajor, "grafana"))
-	if err != nil || created || rec.TokenHash == "" {
-		t.Fatalf("adopt: rec=%+v created=%v err=%v", rec, created, err)
-	}
-	if err := l2.StepStarted("pr-5", tok, "helm upgrade"); err != nil {
-		t.Fatalf("the original step token must work after adoption: %v", err)
+	if _, created, err := l.Start(context.Background(), req("pr-6", TypeChartMajor, "grafana")); err != nil || created {
+		t.Fatalf("clean attach: created=%v err=%v", created, err)
 	}
 }
 
