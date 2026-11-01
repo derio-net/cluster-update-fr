@@ -278,7 +278,9 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 	fmt.Fprintf(&b, "- **Rollback:** %s\n\n", rollback)
 	fmt.Fprintf(&b, "## Pull requests: you open them, the operator merges them\n\n"+
 		"You never merge a PR (your token cannot push to `main`). Open each PR from a branch named `%s%s/<topic>`, "+
-		"commits signed and pushed by the session App, changing only files of this update. Then ask the console:\n\n"+
+		"changing only files of this update. Create every commit THROUGH THE GITHUB API with the session App token — the contents API "+
+		"(`PUT /repos/{repo}/contents/{path}` with `branch`) or GraphQL `createCommitOnBranch` — so GitHub signs it (web-flow) and records "+
+		"the App as the pusher. A plain `git push` of a locally made commit is unsigned and the console refuses the PR. Then ask the console:\n\n"+
 		"```sh\ncurl -fsS -X POST \"$CONSOLE_URL/api/sessions/$UPGRADE_ID/request-merge\" \\\n"+
 		"  -H \"Authorization: Bearer $(cat \"$CREDENTIALS_DIR/session-step-token\")\" -d '{\"pr\": <number>}'\n```\n\n"+
 		"The console verifies the PR (author, branch, signatures, files) and shows a **Merge session PR** button to the operator; "+

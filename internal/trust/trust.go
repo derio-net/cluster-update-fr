@@ -254,7 +254,7 @@ func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) er
 	}
 	// A session or revert PR is only ever checked against the scope made
 	// for it, which names its exact branch prefix: a session's PR must be
-	// on cluster-update/session-<its own upgrade id>- (c1c-r1).
+	// on cluster-update/session-<its own upgrade id>/ (c1c-r1, sec2-3).
 	if (sess || revert) && (scope.BranchPrefix == "" || !strings.HasPrefix(pr.HeadRef, scope.BranchPrefix)) {
 		return fmt.Errorf("branch %q is not this session's or revert's own prefix %q", pr.HeadRef, scope.BranchPrefix)
 	}

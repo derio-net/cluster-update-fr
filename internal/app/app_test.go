@@ -1215,6 +1215,23 @@ func TestHeadMovingBetweenVerifyAndMergeAborts(t *testing.T) {
 	}
 }
 
+// c1d-r6: the brief names the "/" branch form and requires API-created
+// (GitHub-signed) commits; a plain git push is refused.
+func TestBriefRequiresAPICommitsOnTheSessionBranch(t *testing.T) {
+	now := t0
+	a, _, _, _ := newApp(t, &now, false)
+	a.Cycle(context.Background())
+	p, err := a.planSession(context.Background(), "frank-os-talos-1.13.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{engine.SessionBranchPrefix + "frank-os-talos-1.13.4/<topic>", "createCommitOnBranch", "contents API", "git push", "request-merge"} {
+		if !strings.Contains(p.Request.Brief, want) {
+			t.Errorf("brief lacks %q", want)
+		}
+	}
+}
+
 func TestBriefTreatsForgeTextAsData(t *testing.T) {
 	now := t0
 	a, gh, _, _ := newApp(t, &now, false)
