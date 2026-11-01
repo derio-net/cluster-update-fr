@@ -276,6 +276,13 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 	}
 	fmt.Fprintf(&b, "- **Pinned clients:** talosctl %s, kubectl %s\n", talos, kubectl)
 	fmt.Fprintf(&b, "- **Rollback:** %s\n\n", rollback)
+	if typ == session.TypeHopOS {
+		fmt.Fprintf(&b, "## Reaching Hop\n\nHop is reached only over the tailnet, through this pod's tailscale sidecar "+
+			"(SOCKS5 on `%s`, joined as `%s`). The environment already sets `ALL_PROXY` and `HTTPS_PROXY` to `%s` "+
+			"(talosctl honours them) and `NO_PROXY` for the console API. The hop kubeconfig in `$CREDENTIALS_DIR/hop-kubeconfig` "+
+			"names `proxy-url: %s`, so kubectl needs nothing else. If Hop is unreachable, wait for the sidecar to join; never work around it.\n\n",
+			session.TailscaleSOCKS, session.TailscaleTag, session.TailscaleProxyURL, session.TailscaleProxyURL)
+	}
 	fmt.Fprintf(&b, "## Pull requests: you open them, the operator merges them\n\n"+
 		"You never merge a PR (your token cannot push to `main`). Open each PR from a branch named `%s%s/<topic>`, "+
 		"changing only files of this update. Create every commit THROUGH THE GITHUB API with the session App token — the contents API "+

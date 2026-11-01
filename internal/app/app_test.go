@@ -424,7 +424,8 @@ func newApp(t *testing.T, now *time.Time, hop bool) (*App, *fakeGitHub, *fakeSen
 	nowFn := func() time.Time { return *now }
 	a := &App{Cfg: cfg, Repo: frankrepo.FSSource{Root: "../../testdata/frank"}, Frank: fixtureGetter{}, GitHub: gh, Store: st, Telegram: tg, Now: nowFn,
 		Launcher: &session.Launcher{Kube: k, Store: st, Namespace: "upgrade-sessions", Image: cfg.SessionImage, CredDir: t.TempDir(), Now: nowFn,
-			IdleTimeout: 2 * time.Hour, MaxLifetime: 8 * time.Hour},
+			IdleTimeout: 2 * time.Hour, MaxLifetime: 8 * time.Hour,
+			TailscaleImage: "tailscale/tailscale:v1.82.5@sha256:" + strings.Repeat("ab", 32)},
 		Smoke: func(context.Context, frankrepo.Smoke) verify.SmokeResult {
 			return verify.SmokeResult{Checks: []verify.CheckResult{{Status: verify.CheckPassed}}}
 		}}

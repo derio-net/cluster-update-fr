@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -42,8 +44,30 @@ var typeCreds = map[string][]string{
 	TypeStateful:   {"github-token"},
 	TypeRollouts:   {"github-token"},
 	TypeFrankOS:    {"github-token", "omni-sa-key", "talosconfig"},
-	TypeHopOS:      {"github-token", "hop-talosconfig", "hop-kubeconfig"},
+	TypeHopOS:      {"github-token", "hop-talosconfig", "hop-kubeconfig", TailscaleAuthKey},
 }
+
+// TailscaleAuthKey is the hop-os credential the tailscale sidecar joins the
+// tailnet with. It sits in the session's creds Secret but is projected ONLY
+// into the sidecar's env, never into the agent container's volume.
+const TailscaleAuthKey = "tailscale-authkey"
+
+// Hop's tailnet, reached by hop-os sessions through a userspace tailscale
+// sidecar (the session image has no tailscale): SOCKS5 on localhost:1055,
+// joined as tag:frank-updater, with its own uid and state volume.
+const (
+	TailscaleSOCKS     = "localhost:1055"
+	TailscaleProxyURL  = "socks5://" + TailscaleSOCKS
+	TailscaleTag       = "tag:frank-updater"
+	TailscaleUID       = 65531
+	DefaultLoginServer = "https://headscale.hop.derio.net"
+)
+
+var digestPinned = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+
+// ErrNoTailscaleImage: a hop-os session needs the tailscale sidecar image,
+// pinned by digest.
+var ErrNoTailscaleImage = errors.New("session: SESSION_TAILSCALE_IMAGE is not set or not pinned by digest (…@sha256:<64 hex>); hop-os sessions cannot reach Hop")
 
 // Types whose pod runs with frank's per-type ServiceAccount
 // upgrade-session-<type> (read-only rollout checks; Longhorn snapshot or
@@ -87,6 +111,7 @@ type Record struct {
 	// What was created, recorded right after create: an attach proves the
 	// live pod and Secrets are still exactly these objects.
 	Image      string            `json:"image,omitempty"`
+	Sidecar    string            `json:"sidecar_image,omitempty"` // hop-os: the tailscale sidecar image
 	PodUID     string            `json:"pod_uid,omitempty"`
 	SecretUIDs map[string]string `json:"secret_uids,omitempty"`
 	// VerifyUnknown counts consecutive cycles the pod could not be verified.
@@ -126,7 +151,11 @@ type Launcher struct {
 	TranscriptMax int
 	OutcomeMax    int // finish outcome cap (bytes, 0 = 4 KiB)
 	ScrubTimeout  time.Duration
-	scrubFn       func(*scrub.Set, string) string // tests
+	// TailscaleImage (digest-pinned) and TailscaleLoginServer: the hop-os
+	// sidecar.
+	TailscaleImage       string
+	TailscaleLoginServer string
+	scrubFn              func(*scrub.Set, string) string // tests
 
 	startMu  sync.Mutex // serialises Start and the lifecycle Tick
 	mu       sync.Mutex
@@ -227,6 +256,9 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	if l.Image == "" {
 		return Record{}, false, ErrNoImage
 	}
+	if req.Type == TypeHopOS && !digestPinned.MatchString(l.TailscaleImage) {
+		return Record{}, false, ErrNoTailscaleImage
+	}
 	// Starts are serialised: the console is the single writer of its state
 	// (store.ErrLocked), so in-process serialisation makes every Start
 	// observe the previous one's records and objects.
@@ -287,6 +319,9 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	now := l.now()
 	rec := Record{ID: req.UpgradeID, Type: req.Type, Target: target, Pod: pod, Cluster: req.Cluster, App: req.App,
 		StartedAt: now, LastActivity: now, TokenHash: hex.EncodeToString(sum[:]), Image: l.Image, SecretUIDs: map[string]string{}}
+	if req.Type == TypeHopOS {
+		rec.Sidecar = l.TailscaleImage
+	}
 	// Write-ahead: the record (and its token hash) is on disk before the pod.
 	if err := l.update(func(m map[string]Record) error { m[rec.ID] = rec; return nil }); err != nil {
 		release()
@@ -332,7 +367,7 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	}{
 		{"secrets", SecretName(req.UpgradeID), data, secret(SecretName(req.UpgradeID), data)},
 		{"secrets", BriefName(req.UpgradeID), brief, secret(BriefName(req.UpgradeID), brief)},
-		{"pods", pod, nil, l.podSpec(req, pod, labels)},
+		{"pods", pod, nil, l.podSpec(req, pod, labels, data)},
 	} {
 		adopted, err := l.createOwned(ctx, req.UpgradeID, obj.res, obj.name, obj.content, obj.body)
 		if err != nil {
@@ -457,7 +492,10 @@ type livePod struct {
 		Containers         []struct {
 			Image string `json:"image"`
 		} `json:"containers"`
-		InitContainers      []json.RawMessage `json:"initContainers"`
+		InitContainers []struct {
+			Name  string `json:"name"`
+			Image string `json:"image"`
+		} `json:"initContainers"`
 		EphemeralContainers []json.RawMessage `json:"ephemeralContainers"`
 		Volumes             []struct {
 			Name   string `json:"name"`
@@ -484,8 +522,18 @@ func (l *Launcher) verifyOwned(ctx context.Context, rec Record, live livePod) (s
 		return "pod labels are not this session's", false
 	case len(live.Spec.EphemeralContainers) != 0:
 		return "an ephemeral container was added to the pod (it would share the credential volume)", false
-	case len(live.Spec.Containers) != 1 || len(live.Spec.InitContainers) != 0 || live.Spec.Containers[0].Image != rec.Image:
+	case len(live.Spec.Containers) != 1 || live.Spec.Containers[0].Image != rec.Image:
 		return "pod containers/image differ from what the console created", false
+	}
+	// Only a hop-os pod carries an init container: exactly its tailscale
+	// sidecar, at the image recorded at create time.
+	ics := live.Spec.InitContainers
+	if rec.Type == TypeHopOS {
+		if rec.Sidecar == "" || len(ics) != 1 || ics[0].Name != "tailscale" || ics[0].Image != rec.Sidecar {
+			return "pod init containers differ from the console's tailscale sidecar", false
+		}
+	} else if len(ics) != 0 {
+		return "pod has init containers the console did not create", false
 	}
 	wantSA := ""
 	if typeSA[rec.Type] {
@@ -681,7 +729,16 @@ func minorOf(version string, allowed map[string]bool, def string) string {
 	return def
 }
 
-func (l *Launcher) podSpec(req Request, name string, labels map[string]string) map[string]any {
+// noProxy keeps the console's own session API off the tailnet proxy.
+func noProxy(consoleURL string) string {
+	hosts := []string{"localhost", "127.0.0.1", ".svc", ".cluster.local"}
+	if u, err := url.Parse(consoleURL); err == nil && u.Hostname() != "" {
+		hosts = append(hosts, u.Hostname())
+	}
+	return strings.Join(hosts, ",")
+}
+
+func (l *Launcher) podSpec(req Request, name string, labels map[string]string, data map[string]string) map[string]any {
 	env := []map[string]any{
 		{"name": "HOME", "value": SessionHome},
 		{"name": "UPGRADE_TALOS_MINOR", "value": minorOf(req.TalosVersion, talosMinors, DefaultTalosMinor)},
@@ -696,6 +753,25 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string) m
 		{"name": "DISABLE_AUTOUPDATER", "value": "1"},
 		{"name": "CREDENTIALS_DIR", "value": "/run/credentials"},
 	}
+	hop := req.Type == TypeHopOS
+	if hop {
+		// The agent reaches Hop only through the sidecar's SOCKS5: the hop
+		// kubeconfig names proxy-url socks5://localhost:1055; talosctl (gRPC)
+		// honours ALL_PROXY / HTTPS_PROXY.
+		env = append(env,
+			map[string]any{"name": "ALL_PROXY", "value": TailscaleProxyURL},
+			map[string]any{"name": "HTTPS_PROXY", "value": TailscaleProxyURL},
+			map[string]any{"name": "NO_PROXY", "value": noProxy(l.ConsoleURL)})
+	}
+	// The creds volume projects only the agent's keys: the tailscale auth
+	// key reaches the sidecar's env and nothing else.
+	var items []map[string]any
+	for k := range data {
+		if k != TailscaleAuthKey {
+			items = append(items, map[string]any{"key": k, "path": k})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i]["key"].(string) < items[j]["key"].(string) })
 	spec := map[string]any{
 		"restartPolicy":                "Never",
 		"automountServiceAccountToken": typeSA[req.Type],
@@ -728,12 +804,45 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string) m
 		"volumes": []map[string]any{
 			{"name": "home", "emptyDir": map[string]any{"sizeLimit": "4Gi"}},
 			{"name": "tmp", "emptyDir": map[string]any{"sizeLimit": "1Gi"}},
-			{"name": "credentials", "secret": map[string]any{"secretName": SecretName(req.UpgradeID), "defaultMode": 0o400}},
+			{"name": "credentials", "secret": map[string]any{"secretName": SecretName(req.UpgradeID), "defaultMode": 0o400, "items": items}},
 			{"name": "brief", "secret": map[string]any{"secretName": BriefName(req.UpgradeID), "defaultMode": 0o444}},
 		},
 	}
 	if typeSA[req.Type] {
 		spec["serviceAccountName"] = "upgrade-session-" + req.Type
+	}
+	if hop {
+		login := l.TailscaleLoginServer
+		if login == "" {
+			login = DefaultLoginServer
+		}
+		// Native sidecar, as frank's hop-scan CronJob: own uid, own state
+		// volume (node key + tailscaled socket mounted ONLY here), userspace
+		// networking, SOCKS5 on localhost:1055.
+		spec["initContainers"] = []map[string]any{{
+			"name": "tailscale", "image": l.TailscaleImage, "imagePullPolicy": "IfNotPresent", "restartPolicy": "Always",
+			"env": []map[string]any{
+				{"name": "TS_USERSPACE", "value": "true"},
+				{"name": "TS_STATE_DIR", "value": "/ts-state"},
+				{"name": "TS_SOCKET", "value": "/ts-state/tailscaled.sock"},
+				{"name": "TS_KUBE_SECRET", "value": ""},
+				{"name": "TS_SOCKS5_SERVER", "value": TailscaleSOCKS},
+				{"name": "TS_AUTHKEY", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": SecretName(req.UpgradeID), "key": TailscaleAuthKey}}},
+				{"name": "TS_EXTRA_ARGS", "value": "--login-server=" + login + " --hostname=frank-upgrade-" + req.UpgradeID + " --advertise-tags=" + TailscaleTag},
+			},
+			"securityContext": map[string]any{
+				"runAsUser": TailscaleUID, "runAsGroup": TailscaleUID, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+				"capabilities": map[string]any{"drop": []string{"ALL"}},
+			},
+			"resources": map[string]any{
+				"requests": map[string]any{"cpu": "20m", "memory": "64Mi"},
+				"limits":   map[string]any{"cpu": "200m", "memory": "256Mi"},
+			},
+			"volumeMounts": []map[string]any{{"name": "ts-state", "mountPath": "/ts-state"}, {"name": "ts-tmp", "mountPath": "/tmp"}},
+		}}
+		spec["volumes"] = append(spec["volumes"].([]map[string]any),
+			map[string]any{"name": "ts-state", "emptyDir": map[string]any{"sizeLimit": "64Mi"}},
+			map[string]any{"name": "ts-tmp", "emptyDir": map[string]any{"sizeLimit": "64Mi"}})
 	}
 	return map[string]any{"apiVersion": "v1", "kind": "Pod",
 		"metadata": map[string]any{"name": name, "namespace": l.Namespace, "labels": labels}, "spec": spec}

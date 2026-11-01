@@ -156,6 +156,7 @@ func credDir(t *testing.T) string {
 		"talosconfig":     "context: frank\ncontexts:\n  frank:\n    ke" + "y: " + strings.Repeat("Tk3", 8),
 		"hop-talosconfig": "hop-talos-" + strings.Repeat("Ht4", 8),
 		"hop-kubeconfig":  "hop-kube-" + strings.Repeat("Hk5", 8),
+		TailscaleAuthKey:  "tskey-auth-" + strings.Repeat("Ta6", 8),
 		"omni-host":       "never-injected-" + strings.Repeat("X", 8),
 	}
 	for k, v := range files {
@@ -170,8 +171,10 @@ func launcher(t *testing.T, k *fakeKube, now *time.Time) *Launcher {
 	t.Helper()
 	return &Launcher{Kube: k, Store: newStore(t), Namespace: "upgrade-sessions", Image: "ghcr.io/derio-net/upgrade-session:1.0.0",
 		CredDir: credDir(t), ConsoleURL: "http://cluster-update-fr.cluster-update.svc:8080", Now: func() time.Time { return *now },
-		IdleTimeout: 2 * time.Hour, MaxLifetime: 8 * time.Hour}
+		IdleTimeout: 2 * time.Hour, MaxLifetime: 8 * time.Hour, TailscaleImage: testTailscaleImage}
 }
+
+const testTailscaleImage = "tailscale/tailscale:v1.82.5@sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func req(id, typ, app string) Request {
 	cluster := "frank"
@@ -276,7 +279,7 @@ func TestStartBuildsAHardenedPodPerType(t *testing.T) {
 		TypeStateful:   {"github-token"},
 		TypeRollouts:   {"github-token"},
 		TypeFrankOS:    {"github-token", "omni-sa-key", "talosconfig"},
-		TypeHopOS:      {"github-token", "hop-talosconfig", "hop-kubeconfig"},
+		TypeHopOS:      {"github-token", "hop-talosconfig", "hop-kubeconfig", TailscaleAuthKey},
 	}
 	for _, typ := range Types {
 		t.Run(typ, func(t *testing.T) {

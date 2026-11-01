@@ -63,7 +63,12 @@ type Config struct {
 	SessionNamespace string
 	SessionImage     string
 	SessionSecretDir string // directory of per-type credential files (mounted by frank)
-	RunsFrURL        string // attach UI base URL
+	// SessionTailscaleImage is the userspace tailscale sidecar of hop-os
+	// sessions, pinned by digest (…@sha256:<64 hex>); unset or unpinned =
+	// hop-os sessions cannot start.
+	SessionTailscaleImage       string
+	SessionTailscaleLoginServer string // Headscale URL (default https://headscale.hop.derio.net)
+	RunsFrURL                   string // attach UI base URL
 
 	// PR trust (the frank repo is public): only PRs by these bots are acted on.
 	RenovateBot       string   // login of the Renovate GitHub App bot, e.g. "renovate-frank[bot]"
@@ -135,28 +140,30 @@ func Load(getenv func(string) string) (*Config, error) {
 		return def
 	}
 	c := &Config{
-		Listen:           get("LISTEN", ":8080"),
-		OpsListen:        get("OPS_LISTEN", ":9090"),
-		SessionListen:    get("SESSION_API_LISTEN", ":8081"),
-		SessionAPIURL:    strings.TrimRight(get("SESSION_API_URL", ""), "/"),
-		ConsoleURL:       get("CONSOLE_URL", "https://updates.cluster.derio.net"),
-		JWKSURL:          get("AUTHENTIK_JWKS_URL", ""),
-		JWTIssuer:        get("AUTHENTIK_ISSUER", ""),
-		JWTAudience:      get("AUTHENTIK_AUDIENCE", ""),
-		ProxySecretFile:  get("PROXY_SECRET_FILE", ""),
-		OperatorGroup:    get("OPERATOR_GROUP", ""),
-		VictoriaLogsURL:  strings.TrimRight(get("VICTORIALOGS_URL", ""), "/"),
-		FrankRepo:        get("FRANK_REPO", "derio-net/frank"),
-		FrankRef:         get("FRANK_REF", "main"),
-		GitHubAPI:        strings.TrimRight(get("GITHUB_API", "https://api.github.com"), "/"),
-		GiteaURL:         strings.TrimRight(get("GITEA_URL", ""), "/"),
-		StateDir:         get("STATE_DIR", "/var/lib/cluster-update-fr"),
-		HopKubeconfig:    get("HOP_KUBECONFIG", ""),
-		OmniStatusFile:   get("OMNI_STATUS_FILE", ""),
-		SessionNamespace: get("SESSION_NAMESPACE", "upgrade-sessions"),
-		SessionImage:     get("SESSION_IMAGE", ""),
-		SessionSecretDir: get("SESSION_SECRET_DIR", ""),
-		RunsFrURL:        strings.TrimRight(get("RUNS_FR_URL", "https://sessions.cluster.derio.net"), "/"),
+		Listen:                      get("LISTEN", ":8080"),
+		OpsListen:                   get("OPS_LISTEN", ":9090"),
+		SessionListen:               get("SESSION_API_LISTEN", ":8081"),
+		SessionAPIURL:               strings.TrimRight(get("SESSION_API_URL", ""), "/"),
+		ConsoleURL:                  get("CONSOLE_URL", "https://updates.cluster.derio.net"),
+		JWKSURL:                     get("AUTHENTIK_JWKS_URL", ""),
+		JWTIssuer:                   get("AUTHENTIK_ISSUER", ""),
+		JWTAudience:                 get("AUTHENTIK_AUDIENCE", ""),
+		ProxySecretFile:             get("PROXY_SECRET_FILE", ""),
+		OperatorGroup:               get("OPERATOR_GROUP", ""),
+		VictoriaLogsURL:             strings.TrimRight(get("VICTORIALOGS_URL", ""), "/"),
+		FrankRepo:                   get("FRANK_REPO", "derio-net/frank"),
+		FrankRef:                    get("FRANK_REF", "main"),
+		GitHubAPI:                   strings.TrimRight(get("GITHUB_API", "https://api.github.com"), "/"),
+		GiteaURL:                    strings.TrimRight(get("GITEA_URL", ""), "/"),
+		StateDir:                    get("STATE_DIR", "/var/lib/cluster-update-fr"),
+		HopKubeconfig:               get("HOP_KUBECONFIG", ""),
+		OmniStatusFile:              get("OMNI_STATUS_FILE", ""),
+		SessionNamespace:            get("SESSION_NAMESPACE", "upgrade-sessions"),
+		SessionImage:                get("SESSION_IMAGE", ""),
+		SessionSecretDir:            get("SESSION_SECRET_DIR", ""),
+		SessionTailscaleImage:       get("SESSION_TAILSCALE_IMAGE", ""),
+		SessionTailscaleLoginServer: get("SESSION_TAILSCALE_LOGIN_SERVER", "https://headscale.hop.derio.net"),
+		RunsFrURL:                   strings.TrimRight(get("RUNS_FR_URL", "https://sessions.cluster.derio.net"), "/"),
 		Telegram: Telegram{
 			BotToken: secret("telegram-bot-token", getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN"), getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN_FILE")),
 			ChatID:   strings.TrimSpace(getenv("FRANK_UPDATER_TELEGRAM_CHAT_ID")),
