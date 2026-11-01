@@ -40,13 +40,13 @@ func adversarial(n int) (string, string) {
 func TestAdversarialInputIsLinear(t *testing.T) {
 	timeOf := func(n int) (time.Duration, string, string) {
 		in, real := adversarial(n)
-		t0 := time.Now()
-		out := String(in)
-		return time.Since(t0), out, real
+		var out string
+		d := measure(func() { out = String(in) })
+		return d, out, real
 	}
 	small, _, _ := timeOf(256 << 10)
 	big, out, real := timeOf(1 << 20)
-	t.Logf("256 KiB: %v, 1 MiB: %v", small, big)
+	t.Logf("CPU: 256 KiB %v, 1 MiB %v", small, big)
 	if strings.Contains(out, real[len(real)-12:]) {
 		t.Error("the real token survived adversarial input")
 	}

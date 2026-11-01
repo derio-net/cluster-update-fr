@@ -43,6 +43,13 @@ func TestRepositoryHoldsNoTokens(t *testing.T) {
 		if strings.HasSuffix(path, ".go") {
 			found = findInGoSource(string(b))
 		}
+		if rel, _ := filepath.Rel(root, path); rel == filepath.Join("testdata", "scrub", "cases.json") {
+			// The shared fixture (byte-for-byte with frank) deliberately holds
+			// a fake END-less PGP key header inside an Omni SA key's JSON; the
+			// scrubber fails closed on it (scrub-limit), as it must. Only that
+			// kind is excused, only in this file — a real token shape still fails.
+			found = without(found, limitKind)
+		}
 		if len(found) != 0 {
 			rel, _ := filepath.Rel(root, path)
 			t.Errorf("%s contains token-shaped strings: %v", rel, found)
@@ -72,6 +79,16 @@ func moduleRoot() (string, error) {
 		}
 		dir = parent
 	}
+}
+
+func without(kinds []string, drop string) []string {
+	var out []string
+	for _, k := range kinds {
+		if k != drop {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func isBinary(b []byte) bool {

@@ -109,9 +109,14 @@ func mk(kind string, begins func(string, int) bool, body, notBefore string, reac
 	return pattern{kind: kind, begins: begins, notBefore: notBefore, reach: reach, re: regexp.MustCompile(`^(?:` + body + `)`)}
 }
 
+// pemHeaderRe is the private-key pattern's header part — the ONE definition
+// both the pattern and its fail-closed path (a header with no END in reach)
+// use, so no header form the pattern recognises can skip failing closed.
+const pemHeaderRe = `-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`
+
 var patterns = []pattern{
 	mk("private-key", lit("-----BEGIN "),
-		`(-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)`, "", reachFar),
+		`(`+pemHeaderRe+`[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)`, "", reachFar),
 	withClassify(mk("jwt", lit("eyJ"), `(eyJ[A-Za-z0-9_+/=-]{20,}(?:\.[A-Za-z0-9_+/=-]+)*)`, b64Chars, reachRun), classifyEyJ),
 	mk("github-pat", lit("github_pat_"), `(github_pat_[A-Za-z0-9_]{22,})`, wordChars, reachRun),
 	mk("github-token", ghToken, `((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,})`, wordChars, reachRun),

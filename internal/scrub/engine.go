@@ -272,6 +272,7 @@ func spans(text string, skipCodeNoise bool, deadline time.Time) (out []hit, limi
 	n := len(text)
 	budget := workBudget(n)
 	li := newLineIndex(text)
+	ends := newMarkIndex(text, "-----END ")
 	var cands []candidate
 	var closed []hit // fail-closed regions found while matching
 	undecided := -1
@@ -300,12 +301,7 @@ func spans(text string, skipCodeNoise bool, deadline time.Time) (out []hit, limi
 					// cap cut it, to a later END line if there is one.
 					e := li.end(w)
 					if capped {
-						j := strings.Index(text[w:], "-----END ")
-						if j < 0 {
-							j = n - w
-						}
-						budget -= j
-						e = li.end(capAt(w, j, n))
+						e = li.end(ends.next(w)) // the first END at or after the window end (index, not a rescan)
 					}
 					closed = append(closed, hit{s, e, limitKind})
 				}
@@ -343,7 +339,35 @@ func spans(text string, skipCodeNoise bool, deadline time.Time) (out []hit, limi
 	return merge(acc), limited
 }
 
-var privateHeader = regexp.MustCompile(`^-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----\s`) // a real header line: body follows on the next line
+var privateHeader = regexp.MustCompile(`^` + pemHeaderRe) // the pattern's own header, no extra constraint
+
+// markIndex holds every position of a marker (one linear pass).
+type markIndex struct {
+	at []int
+	n  int
+}
+
+func newMarkIndex(text, mark string) markIndex {
+	mi := markIndex{n: len(text)}
+	for i := 0; i < len(text); {
+		j := strings.Index(text[i:], mark)
+		if j < 0 {
+			break
+		}
+		mi.at = append(mi.at, i+j)
+		i += j + len(mark)
+	}
+	return mi
+}
+
+// next is the first marker position at or after i (or the text length).
+func (mi markIndex) next(i int) int {
+	k := sort.SearchInts(mi.at, i)
+	if k < len(mi.at) {
+		return mi.at[k]
+	}
+	return mi.n
+}
 
 // lineIndex holds every '\n' position (one linear pass), so a line end is a
 // binary search, never a rescan of a long line per start.

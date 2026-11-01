@@ -37,6 +37,29 @@ func TestPEMLongerThanTheWindowFailsClosed(t *testing.T) {
 	}
 }
 
+// The fail-closed path uses the pattern's own header — every header form the
+// pattern recognises fails closed when its END is missing: JSON-escaped
+// (a literal backslash-n), the body glued straight to the dashes, CRLF.
+func TestEveryHeaderFormFailsClosed(t *testing.T) {
+	h := "-----BEGIN PRIVATE " + "KEY-----"
+	for name, in := range map[string]string{
+		"json-escaped":  `{"k":"` + h + `\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nTAILJSONBODY"}`,
+		"glued base64":  h + "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCTAILGLUEDBODY",
+		"crlf":          h + "\r\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\r\nTAILCRLFBODY\r\n",
+		"rsa, no space": "-----BEGIN RSA PRIVATE " + "KEY-----MIIEvQTAILRSABODY",
+	} {
+		got := String("x " + in)
+		for _, leak := range []string{"MIIEvQ", "TAIL"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("%s: %q survived in %q", name, leak, got)
+			}
+		}
+		if !strings.Contains(strings.Join(Find(in), ","), limitKind) {
+			t.Errorf("%s: not reported as fail-closed", name)
+		}
+	}
+}
+
 // An ordinary certificate (not a private key) is not fail-closed.
 func TestCertificateIsNotFailClosed(t *testing.T) {
 	cert := "-----BEGIN CERTIFICATE-----\n" + strings.Repeat("MIIC", 10) + "\n-----END CERTIFICATE-----"
@@ -66,13 +89,10 @@ func singleLine(n int) (string, string) {
 func TestSingleLineAdversarialIsLinear(t *testing.T) {
 	small, _ := singleLine(256 << 10)
 	big, real := singleLine(1 << 20)
-	t0 := time.Now()
-	String(small)
-	ts := time.Since(t0)
-	t0 = time.Now()
-	out := String(big)
-	tb := time.Since(t0)
-	t.Logf("single line: 256 KiB %v, 1 MiB %v", ts, tb)
+	ts := measure(func() { String(small) })
+	var out string
+	tb := measure(func() { out = String(big) })
+	t.Logf("single line CPU: 256 KiB %v, 1 MiB %v", ts, tb)
 	if strings.Contains(out, real[len(real)-12:]) {
 		t.Error("the real token survived")
 	}
@@ -99,8 +119,8 @@ func TestSingleLineCapEndsFullyRedacted(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			set(t)
-			t0 := time.Now()
-			out := String(big)
+			var out string
+			d := measure(func() { out = String(big) })
 			if strings.Contains(out, real[len(real)-12:]) || strings.Contains(out, "qqqqqqqq") || strings.Contains(out, "xxxxxxxx") {
 				t.Fatal("a secret survived a tripped cap")
 			}
@@ -108,7 +128,7 @@ func TestSingleLineCapEndsFullyRedacted(t *testing.T) {
 			if raceEnabled {
 				limit = 60 * time.Second // the race detector slows the literal layer ~15x
 			}
-			if d := time.Since(t0); d > limit {
+			if d > limit {
 				t.Errorf("fail-closed path took %v", d)
 			}
 		})
