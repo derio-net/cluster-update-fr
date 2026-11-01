@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/derio-net/cluster-update-fr/internal/config"
+	"github.com/derio-net/cluster-update-fr/internal/engine"
 	"github.com/derio-net/cluster-update-fr/internal/forge"
 	"github.com/derio-net/cluster-update-fr/internal/frankrepo"
 	"github.com/derio-net/cluster-update-fr/internal/kube"
@@ -373,6 +374,34 @@ func TestCITimeoutRunsFromThePush(t *testing.T) {
 		if it.ID == "pr-7" && it.CI != "missing" {
 			t.Fatalf("pr-7 CI = %s (%s): the 30m timeout must run from the push 3h ago", it.CI, it.CIDetail)
 		}
+	}
+}
+
+// c1c-r3: a merged batch is verified through its members (each on its own
+// app/cluster); it fails, naming the member, when one fails.
+func TestBatchIsVerifiedThroughItsMembers(t *testing.T) {
+	now := t0
+	a, _, _, _ := newApp(t, &now, false)
+	st := a.Store
+	for _, id := range []string{"pr-1", "pr-2"} {
+		st.Track(store.Update{ID: id, Title: id})
+	}
+	st.Track(store.Update{ID: "batch-9", Title: "batch", Kind: "batch"})
+	st.Record(engine.Event{At: t0, Item: "batch-9", Action: "batch-approved", By: "derio", PR: 9, Members: []string{"pr-1", "pr-2"}})
+	st.Record(engine.Event{At: t0, Item: "batch-9", Action: "merged", By: "derio", PR: 9, SHA: "b9"})
+	for _, id := range []string{"pr-1", "pr-2"} {
+		_ = st.Transition(id, store.Applied, "verifier", "", nil)
+	}
+	_ = st.Transition("pr-1", store.Verified, "verifier", "", func(u *store.Update) { u.Verification = "grafana: 1/1" })
+	decl := &frankrepo.Declarations{}
+	a.verify(context.Background(), decl, nil, nil, &View{})
+	if b, _ := st.Get("batch-9"); b.State != store.Applied {
+		t.Fatalf("one member verified, one applied: batch = %s", b.State)
+	}
+	_ = st.Transition("pr-2", store.Failed, "verifier", "failed at step smoke caddy", nil)
+	a.verify(context.Background(), decl, nil, nil, &View{})
+	if b, _ := st.Get("batch-9"); b.State != store.Failed || !strings.Contains(b.Reason, "pr-2") {
+		t.Fatalf("a failed member must fail the batch, naming it: %+v", b)
 	}
 }
 

@@ -52,6 +52,8 @@ type Event struct {
 	PR     int
 	SHA    string
 	Detail string
+	// Members are the item ids a batch carries (batch-approved only).
+	Members []string
 }
 
 // Ledger persists what the engine decides (implemented by the store).
@@ -483,6 +485,7 @@ func SuggestBatch(items []Item) []Item {
 type BatchResult struct {
 	PR       forge.PR
 	Included []string
+	Members  []string // item ids of the included updates
 	Skipped  []string // conflicted with the batch
 }
 
@@ -522,6 +525,7 @@ func (e *Engine) ApproveBatch(ctx context.Context, items []Item, ids []string, b
 			return res, err
 		}
 		res.Included = append(res.Included, it.Name)
+		res.Members = append(res.Members, it.ID)
 		lines = append(lines, fmt.Sprintf("- %s `%s` → `%s` (#%d)", it.Name, it.From, it.To, it.PR.Number))
 	}
 	if len(res.Included) == 0 {
@@ -538,7 +542,11 @@ func (e *Engine) ApproveBatch(ctx context.Context, items []Item, ids []string, b
 	}
 	res.PR = pr
 	e.Ledger.SetApproved(BatchID(pr.Number), by)
-	e.Ledger.Record(Event{At: e.Now(), Item: BatchID(pr.Number), Action: "batch-approved", By: by, PR: pr.Number, Detail: strings.Join(res.Included, ", ")})
+	// The batch record carries its members (their item ids, whose records
+	// hold each dependency's app and cluster), so the batch is verified
+	// through them, not through PR body text (c1c-r3).
+	e.Ledger.Record(Event{At: e.Now(), Item: BatchID(pr.Number), Action: "batch-approved", By: by, PR: pr.Number,
+		Detail: strings.Join(res.Included, ", "), Members: res.Members})
 	return res, nil
 }
 

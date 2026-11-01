@@ -98,6 +98,10 @@ type Update struct {
 	Rollback     string    `json:"rollback,omitempty"`
 	Session      string    `json:"session,omitempty"`
 	Transcript   string    `json:"transcript,omitempty"` // scrubbed
+	// Members (a batch) are the item ids it carries; ShippedIn (a member)
+	// is the batch PR that took it to main (c1c-r3).
+	Members   []string `json:"members,omitempty"`
+	ShippedIn int      `json:"shipped_in,omitempty"`
 }
 
 // Event is one History entry.
@@ -471,7 +475,12 @@ func (s *Store) Record(e engine.Event) {
 	s.appendEvent(Event{At: e.At, Update: e.Item, Action: e.Action, By: e.By, Reason: e.Detail, PR: e.PR, SHA: e.SHA})
 	switch e.Action {
 	case "approved", "batch-approved":
-		_ = s.transition(e.Item, Approved, e.By, "", func(u *Update) { u.Approver = e.By })
+		_ = s.transition(e.Item, Approved, e.By, "", func(u *Update) {
+			u.Approver = e.By
+			if len(e.Members) > 0 {
+				u.Members, u.Kind = append([]string(nil), e.Members...), "batch"
+			}
+		})
 	case "merged":
 		_ = s.transition(e.Item, Merged, e.By, "", func(u *Update) {
 			u.MergeSHA, u.PR = e.SHA, e.PR
@@ -479,6 +488,7 @@ func (s *Store) Record(e engine.Event) {
 				u.Approver = e.By
 			}
 		})
+		s.shipMembers(e.Item)
 	case "held":
 		_ = s.transition(e.Item, Held, e.By, "held by "+e.By, nil)
 	case "released":
@@ -491,6 +501,28 @@ func (s *Store) Record(e engine.Event) {
 		if u.State == Merged || u.State == Applied || u.State == Verified || u.State == Failed {
 			_ = s.transition(e.Item, RolledBack, e.By, "revert PR #"+fmt.Sprint(e.PR)+" opened", nil)
 		}
+	}
+}
+
+// shipMembers: a merged batch carries its members to main, so each member
+// moves to merged with the batch's merge commit, "shipped in batch #N", and
+// is verified on its own app and cluster (c1c-r3). Caller holds s.mu.
+func (s *Store) shipMembers(batchID string) {
+	b, ok := s.d.Updates[batchID]
+	if !ok || b.State != Merged {
+		return
+	}
+	for _, id := range b.Members {
+		m, ok := s.d.Updates[id]
+		if !ok || (m.State != Pending && m.State != Approved && m.State != Held) {
+			continue
+		}
+		_ = s.transitionAs(id, Merged, b.Approver, fmt.Sprintf("shipped in batch #%d", b.PR), func(u *Update) {
+			u.MergeSHA, u.ShippedIn = b.MergeSHA, b.PR
+			if u.Approver == "" {
+				u.Approver = b.Approver
+			}
+		}, m.State == Held)
 	}
 }
 
@@ -598,15 +630,36 @@ func (s *Store) Reconcile(in ReconcileInput) ([]Cleanup, []error) {
 			errs = append(errs, fmt.Errorf("reconcile %s: %w", id, err))
 		}
 	}
+	// Batches first: a merged batch ships its members before their own
+	// (closed by Renovate) PRs could read as "closed without merging".
+	ids := make([]string, 0, len(s.d.Updates))
 	for id, u := range s.d.Updates {
+		if len(u.Members) > 0 {
+			ids = append([]string{id}, ids...)
+		} else {
+			ids = append(ids, id)
+		}
+	}
+	waitingInBatch := map[string]bool{}
+	for _, id := range ids {
+		u := s.d.Updates[id]
 		switch u.State {
 		case Pending, Approved, Held:
+			if waitingInBatch[id] {
+				continue // its batch PR is still open; it goes with the batch
+			}
+			if len(u.Members) > 0 && (u.PR == 0 || in.OpenPRs[u.PR]) {
+				for _, m := range u.Members {
+					waitingInBatch[m] = true
+				}
+			}
 			if u.PR > 0 && !in.OpenPRs[u.PR] {
 				if sha, ok := in.MergedPRs[u.PR]; ok {
 					// The PR merged on GitHub even though the console held it
 					// (a person, or a batch): the reconciler records the fact,
 					// so held → merged is legal for it alone.
 					try(id, s.transitionAs(id, Merged, "reconciler", "", func(u *Update) { u.MergeSHA = sha }, u.State == Held))
+					s.shipMembers(id)
 					continue
 				}
 				try(id, s.transition(id, Abandoned, "reconciler", fmt.Sprintf("PR #%d closed without merging", u.PR), nil))

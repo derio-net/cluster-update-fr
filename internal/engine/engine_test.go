@@ -303,6 +303,9 @@ func TestSuggestAndApproveBatch(t *testing.T) {
 	if strings.Join(f.branchMerge, ",") != "sha1" || len(res.Skipped) != 1 || res.Skipped[0] != "c" {
 		t.Errorf("merged=%v skipped=%v", f.branchMerge, res.Skipped)
 	}
+	if ev := l.events[len(l.events)-1]; ev.Action != "batch-approved" || strings.Join(ev.Members, ",") != suggested[0].ID {
+		t.Errorf("the batch record must carry its members (c1c-r3): %+v", ev)
+	}
 	if ok, by := l.Approved(BatchID(100)); !ok || by != "derio" {
 		t.Error("the batch PR is approved for merge once CI passes")
 	}

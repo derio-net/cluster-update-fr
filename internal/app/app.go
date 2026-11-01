@@ -517,6 +517,8 @@ func (a *App) verify(ctx context.Context, decl *frankrepo.Declarations, frank, h
 			out = verify.OS(cv, snap, a.clusterSmoke(ctx, decl, u.Cluster))
 		case inventory.KindOmni:
 			continue // operator runbook: tracked, not verified here
+		case "batch":
+			out = batchOutcome(a.Store, u)
 		default:
 			snap := frank
 			if u.Cluster == "hop" {
@@ -563,6 +565,39 @@ func (a *App) verify(ctx context.Context, decl *frankrepo.Declarations, frank, h
 			_ = a.Store.Transition(u.ID, store.Failed, "verifier", out.Reason, set)
 		}
 	}
+}
+
+// batchOutcome verifies a batch through its members, each verified on its
+// own app and cluster (c1c-r3): verified when every member is, failed when
+// any member failed (naming it), else still rolling out.
+func batchOutcome(st *store.Store, b store.Update) verify.Outcome {
+	if len(b.Members) == 0 {
+		return verify.Outcome{To: verify.OutcomeWaiting, Reason: "batch has no recorded members"}
+	}
+	done, applied := 0, 0
+	var summaries []string
+	for _, id := range b.Members {
+		m, ok := st.Get(id)
+		switch {
+		case !ok:
+			return verify.Outcome{To: verify.OutcomeWaiting, Reason: "member " + id + " unknown"}
+		case m.State == store.Failed || m.State == store.RolledBack:
+			return verify.Outcome{To: verify.OutcomeFailed, Reason: fmt.Sprintf("member %s (%s) %s: %s", id, m.Title, m.State, m.Reason)}
+		case m.State == store.Verified:
+			done++
+			applied++
+			summaries = append(summaries, id+": "+m.Verification)
+		case m.State == store.Applied:
+			applied++
+		}
+	}
+	switch {
+	case done == len(b.Members):
+		return verify.Outcome{To: verify.OutcomeVerified, Rollout: fmt.Sprintf("%d members applied", applied), Reason: strings.Join(summaries, "; ")}
+	case applied == len(b.Members):
+		return verify.Outcome{To: verify.OutcomeApplied, Rollout: fmt.Sprintf("%d members applied", applied)}
+	}
+	return verify.Outcome{To: verify.OutcomeWaiting, Reason: fmt.Sprintf("%d of %d members verified", done, len(b.Members))}
 }
 
 func (a *App) clusterSmoke(ctx context.Context, decl *frankrepo.Declarations, cluster string) []verify.SmokeResult {

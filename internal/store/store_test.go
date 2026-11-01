@@ -148,6 +148,38 @@ func TestPersistenceAndCorruptFile(t *testing.T) {
 	}
 }
 
+// c1c-r3: a merged batch ships its members — each becomes merged with the
+// batch's merge commit, "shipped in batch #N", not "abandoned" when Renovate
+// later closes its PR — whether the console merged it or the reconciler
+// found it merged.
+func TestMergedBatchShipsItsMembers(t *testing.T) {
+	for _, via := range []string{"engine", "reconciler"} {
+		t.Run(via, func(t *testing.T) {
+			s, _ := open(t)
+			s.Track(Update{ID: "pr-1", Title: "a", PR: 1, Apps: []string{"grafana"}, Cluster: "frank"})
+			s.Track(Update{ID: "pr-2", Title: "b", PR: 2, Apps: []string{"caddy"}, Cluster: "hop"})
+			_ = s.Transition("pr-2", Held, "derio", "held by derio", nil)
+			s.Record(engine.Event{At: t0, Item: "batch-100", Action: "batch-approved", By: "derio", PR: 100, Members: []string{"pr-1", "pr-2"}})
+			if via == "engine" {
+				s.Record(engine.Event{At: t0, Item: "batch-100", Action: "merged", By: "derio", PR: 100, SHA: "b100"})
+			} else {
+				_, _ = s.Reconcile(ReconcileInput{OpenPRs: map[int]bool{}, MergedPRs: map[int]string{100: "b100"}})
+			}
+			for _, id := range []string{"pr-1", "pr-2"} {
+				u, _ := s.Get(id)
+				if u.State != Merged || u.MergeSHA != "b100" || u.ShippedIn != 100 || !strings.Contains(u.Reason, "shipped in batch #100") {
+					t.Errorf("%s = %+v", id, u)
+				}
+			}
+			// Renovate closes the member PRs afterwards: nothing is abandoned.
+			_, _ = s.Reconcile(ReconcileInput{OpenPRs: map[int]bool{}})
+			if u, _ := s.Get("pr-1"); u.State == Abandoned {
+				t.Error("a shipped member was abandoned")
+			}
+		})
+	}
+}
+
 func TestLedgerDrivesUpdates(t *testing.T) {
 	s, _ := open(t)
 	s.Track(Update{ID: "pr-1", Title: "Update a", PR: 1})
