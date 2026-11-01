@@ -54,16 +54,50 @@ const TailscaleAuthKey = "tailscale-authkey"
 
 // Hop's tailnet, reached by hop-os sessions through a userspace tailscale
 // sidecar (the session image has no tailscale): SOCKS5 on localhost:1055,
-// joined as tag:frank-updater, with its own uid and state volume.
+// joined as the session tag (SESSION_TAILSCALE_TAG, default
+// tag:frank-session — never hop-scan's tag:frank-updater, so Headscale ACLs
+// can tell an upgrade session from the scanner), with its own uid and state
+// volume.
 const (
-	TailscaleSOCKS     = "localhost:1055"
-	TailscaleProxyURL  = "socks5://" + TailscaleSOCKS
-	TailscaleTag       = "tag:frank-updater"
-	TailscaleUID       = 65531
-	DefaultLoginServer = "https://headscale.hop.derio.net"
+	TailscaleSOCKS      = "localhost:1055"
+	TailscaleProxyURL   = "socks5://" + TailscaleSOCKS
+	DefaultTailscaleTag = "tag:frank-session"
+	ScannerTailscaleTag = "tag:frank-updater"
+	TailscaleUID        = 65531
+	DefaultLoginServer  = "https://headscale.hop.derio.net"
 )
 
-var digestPinned = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+var (
+	digestPinned = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
+	validTag     = regexp.MustCompile(`^tag:[a-z0-9][a-z0-9-]*$`)
+)
+
+// ErrBadTailscaleTag: the session tag is malformed or is the scanner's.
+var ErrBadTailscaleTag = errors.New("session: SESSION_TAILSCALE_TAG must be one tag:<lowercase-name> and not " + ScannerTailscaleTag)
+
+// SessionTag is the tag hop-os sessions join the tailnet as (for briefs);
+// a nil launcher reports the default.
+func (l *Launcher) SessionTag() string {
+	if l == nil {
+		return DefaultTailscaleTag
+	}
+	if tag, err := l.tailscaleTag(); err == nil {
+		return tag
+	}
+	return "(invalid SESSION_TAILSCALE_TAG — hop-os sessions cannot start)"
+}
+
+// tailscaleTag is the tag hop-os sessions join as.
+func (l *Launcher) tailscaleTag() (string, error) {
+	tag := l.TailscaleTag
+	if tag == "" {
+		tag = DefaultTailscaleTag
+	}
+	if !validTag.MatchString(tag) || tag == ScannerTailscaleTag {
+		return "", ErrBadTailscaleTag
+	}
+	return tag, nil
+}
 
 // ErrNoTailscaleImage: a hop-os session needs the tailscale sidecar image,
 // pinned by digest.
@@ -155,6 +189,7 @@ type Launcher struct {
 	// sidecar.
 	TailscaleImage       string
 	TailscaleLoginServer string
+	TailscaleTag         string                          // "" = DefaultTailscaleTag
 	scrubFn              func(*scrub.Set, string) string // tests
 
 	startMu  sync.Mutex // serialises Start and the lifecycle Tick
@@ -256,8 +291,13 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	if l.Image == "" {
 		return Record{}, false, ErrNoImage
 	}
-	if req.Type == TypeHopOS && !digestPinned.MatchString(l.TailscaleImage) {
-		return Record{}, false, ErrNoTailscaleImage
+	if req.Type == TypeHopOS {
+		if !digestPinned.MatchString(l.TailscaleImage) {
+			return Record{}, false, ErrNoTailscaleImage
+		}
+		if _, err := l.tailscaleTag(); err != nil {
+			return Record{}, false, err
+		}
 	}
 	// Starts are serialised: the console is the single writer of its state
 	// (store.ErrLocked), so in-process serialisation makes every Start
@@ -816,6 +856,7 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string, d
 		if login == "" {
 			login = DefaultLoginServer
 		}
+		tag, _ := l.tailscaleTag() // validated by Start
 		// Native sidecar, as frank's hop-scan CronJob: own uid, own state
 		// volume (node key + tailscaled socket mounted ONLY here), userspace
 		// networking, SOCKS5 on localhost:1055.
@@ -828,7 +869,7 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string, d
 				{"name": "TS_KUBE_SECRET", "value": ""},
 				{"name": "TS_SOCKS5_SERVER", "value": TailscaleSOCKS},
 				{"name": "TS_AUTHKEY", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": SecretName(req.UpgradeID), "key": TailscaleAuthKey}}},
-				{"name": "TS_EXTRA_ARGS", "value": "--login-server=" + login + " --hostname=frank-upgrade-" + req.UpgradeID + " --advertise-tags=" + TailscaleTag},
+				{"name": "TS_EXTRA_ARGS", "value": "--login-server=" + login + " --hostname=frank-upgrade-" + req.UpgradeID + " --advertise-tags=" + tag},
 			},
 			"securityContext": map[string]any{
 				"runAsUser": TailscaleUID, "runAsGroup": TailscaleUID, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,

@@ -68,6 +68,7 @@ type Config struct {
 	// hop-os sessions cannot start.
 	SessionTailscaleImage       string
 	SessionTailscaleLoginServer string // Headscale URL (default https://headscale.hop.derio.net)
+	SessionTailscaleTag         string // tag hop-os sessions join as (default tag:frank-session; never tag:frank-updater)
 	RunsFrURL                   string // attach UI base URL
 
 	// PR trust (the frank repo is public): only PRs by these bots are acted on.
@@ -163,6 +164,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		SessionSecretDir:            get("SESSION_SECRET_DIR", ""),
 		SessionTailscaleImage:       get("SESSION_TAILSCALE_IMAGE", ""),
 		SessionTailscaleLoginServer: get("SESSION_TAILSCALE_LOGIN_SERVER", "https://headscale.hop.derio.net"),
+		SessionTailscaleTag:         get("SESSION_TAILSCALE_TAG", "tag:frank-session"),
 		RunsFrURL:                   strings.TrimRight(get("RUNS_FR_URL", "https://sessions.cluster.derio.net"), "/"),
 		Telegram: Telegram{
 			BotToken: secret("telegram-bot-token", getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN"), getenv("FRANK_UPDATER_TELEGRAM_BOT_TOKEN_FILE")),

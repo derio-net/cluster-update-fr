@@ -56,7 +56,7 @@ func TestHopOSGetsAnIsolatedTailscaleSidecar(t *testing.T) {
 			t.Errorf("sidecar %s = %v", k, te[k])
 		}
 	}
-	if !strings.Contains(te["TS_EXTRA_ARGS"]["value"].(string), "--advertise-tags=tag:frank-updater") ||
+	if !strings.Contains(te["TS_EXTRA_ARGS"]["value"].(string), "--advertise-tags=tag:frank-session") ||
 		!strings.Contains(te["TS_EXTRA_ARGS"]["value"].(string), "--login-server=https://headscale.hop.derio.net") {
 		t.Errorf("TS_EXTRA_ARGS = %v", te["TS_EXTRA_ARGS"])
 	}
@@ -112,6 +112,42 @@ func TestHopOSGetsAnIsolatedTailscaleSidecar(t *testing.T) {
 	pod["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)["image"] = "evil/tailscale:latest"
 	if _, _, err := l.Start(context.Background(), req(id, TypeHopOS, "")); err == nil {
 		t.Fatal("a pod with a swapped sidecar image was attached")
+	}
+}
+
+// p5-r3: the session tag is configurable, defaults to tag:frank-session, and
+// can never be hop-scan's tag:frank-updater (or malformed).
+func TestSessionTailscaleTag(t *testing.T) {
+	now := time.Unix(1000, 0)
+	argsOf := func(k *fakeKube, id string) string {
+		spec := k.objects["pods/"+PodName(id)]["spec"].(map[string]any)
+		ts := spec["initContainers"].([]any)[0].(map[string]any)
+		return envOf(ts)["TS_EXTRA_ARGS"]["value"].(string)
+	}
+	k := newFake()
+	l := launcher(t, k, &now)
+	if _, _, err := l.Start(context.Background(), req("hop-os-tag-1", TypeHopOS, "")); err != nil {
+		t.Fatal(err)
+	}
+	if a := argsOf(k, "hop-os-tag-1"); !strings.Contains(a, "--advertise-tags=tag:frank-session") || strings.Contains(a, "frank-updater") {
+		t.Errorf("default tag: %s", a)
+	}
+	k = newFake()
+	l = launcher(t, k, &now)
+	l.TailscaleTag = "tag:upgrade-sessions"
+	if _, _, err := l.Start(context.Background(), req("hop-os-tag-2", TypeHopOS, "")); err != nil {
+		t.Fatal(err)
+	}
+	if a := argsOf(k, "hop-os-tag-2"); !strings.Contains(a, "--advertise-tags=tag:upgrade-sessions") {
+		t.Errorf("configured tag: %s", a)
+	}
+	for _, bad := range []string{"tag:frank-updater", "frank-session", "tag:", "tag:a b", "tag:x,tag:frank-updater"} {
+		k := newFake()
+		l := launcher(t, k, &now)
+		l.TailscaleTag = bad
+		if _, _, err := l.Start(context.Background(), req("hop-os-tag-3", TypeHopOS, "")); !errors.Is(err, ErrBadTailscaleTag) || len(k.creates) != 0 {
+			t.Errorf("tag %q: err=%v creates=%d", bad, err, len(k.creates))
+		}
 	}
 }
 

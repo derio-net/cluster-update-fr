@@ -70,7 +70,7 @@ func main() {
 			CredDir: cfg.SessionSecretDir, ConsoleURL: cfg.SessionAPIURL, IdleTimeout: cfg.IdleTimeout, MaxLifetime: cfg.MaxLifetime,
 			HardCeiling: cfg.HardCeiling, StepCap: cfg.StepCap, StepTotalCap: cfg.StepTotalCap, MaxStepStarts: cfg.MaxStepStarts,
 			TranscriptMax: cfg.TranscriptMax, OutcomeMax: cfg.OutcomeMax, ScrubTimeout: cfg.TranscriptScrubTimeout,
-			TailscaleImage: cfg.SessionTailscaleImage, TailscaleLoginServer: cfg.SessionTailscaleLoginServer}
+			TailscaleImage: cfg.SessionTailscaleImage, TailscaleLoginServer: cfg.SessionTailscaleLoginServer, TailscaleTag: cfg.SessionTailscaleTag}
 		a.Launcher.RegisterCredentials() // before any listener serves a byte (c1s-r5)
 	}
 	if cfg.HopKubeconfig != "" {
