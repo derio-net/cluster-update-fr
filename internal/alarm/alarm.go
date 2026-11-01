@@ -52,7 +52,13 @@ type Record struct {
 	LastAlarmed     time.Time `json:"last_alarmed"`
 	OverdueAlarmed  bool      `json:"overdue_alarmed"`
 	AlarmedSeverity string    `json:"alarmed_severity"`
+	// Missed counts consecutive successful scans that did NOT see it; it
+	// resolves only at ResolveAfter (c1c-r13), so a flap is not a new alarm.
+	Missed int `json:"missed,omitempty"`
 }
+
+// ResolveAfter is how many consecutive clean scans resolve a record.
+const ResolveAfter = 3
 
 // Reason is why an alarm fires.
 type Reason string
@@ -110,8 +116,9 @@ func Evaluate(prev map[string]Record, findings []Finding, scanned map[string]boo
 			reason = ReasonSeverityRaised
 			r.Deadline = r.FirstSeen.Add(Deadlines[f.Vuln.Severity])
 			r.AlarmedSeverity = f.Vuln.Severity
+			r.OverdueAlarmed = false // the new deadline alarms on its own
 		}
-		r.Severity, r.Fixed, r.Image, r.LastSeen = f.Vuln.Severity, f.Vuln.Fixed, f.Image, now
+		r.Severity, r.Fixed, r.Image, r.LastSeen, r.Missed = f.Vuln.Severity, f.Vuln.Fixed, f.Image, now, 0
 		if reason == "" && !r.OverdueAlarmed && !r.Deadline.IsZero() && now.After(r.Deadline) {
 			reason = ReasonOverdue
 			r.OverdueAlarmed = true
@@ -124,8 +131,11 @@ func Evaluate(prev map[string]Record, findings []Finding, scanned map[string]boo
 	}
 	for k, r := range next {
 		if !seen[k] && r.State != StateResolved && scanned[r.Cluster] {
-			r.State = StateResolved
-			r.LastSeen = now
+			r.Missed++
+			if r.Missed >= ResolveAfter {
+				r.State = StateResolved
+				r.LastSeen = now
+			}
 			next[k] = r
 		}
 	}

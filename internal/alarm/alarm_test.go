@@ -52,10 +52,55 @@ func TestAlarmOnlyOnStateChange(t *testing.T) {
 	if len(alarms) != 0 {
 		t.Fatalf("overdue repeated: %v", reasons(alarms))
 	}
-	// Resolved: silent.
-	recs, alarms = Evaluate(recs, nil, scanned, t0.Add(6*24*time.Hour))
+	// Resolved after ResolveAfter consecutive clean scans: silent.
+	for i := 0; i < ResolveAfter; i++ {
+		recs, alarms = Evaluate(recs, nil, scanned, t0.Add(6*24*time.Hour+time.Duration(i)*time.Hour))
+	}
 	if len(alarms) != 0 || recs[Key(finding("CVE-1", "", ""))].State != StateResolved {
 		t.Fatalf("resolve: %v %+v", reasons(alarms), recs)
+	}
+}
+
+// c1c-r13: a finding missing from one or two scans (a scanner hiccup, a
+// pod restarting) is not resolved, so its return is not a "new" alarm.
+func TestFlappingFindingDoesNotReAlarm(t *testing.T) {
+	scanned := map[string]bool{"frank": true}
+	f := []Finding{finding("CVE-2", "CRITICAL", "")}
+	recs, _ := Evaluate(nil, f, scanned, t0)
+	for i := 1; i < ResolveAfter; i++ {
+		recs, _ = Evaluate(recs, nil, scanned, t0.Add(time.Duration(i)*time.Hour))
+	}
+	if recs[Key(f[0])].State == StateResolved {
+		t.Fatal("resolved before ResolveAfter consecutive clean scans")
+	}
+	recs, alarms := Evaluate(recs, f, scanned, t0.Add(10*time.Hour))
+	if len(alarms) != 0 {
+		t.Fatalf("reappearance re-alarmed: %v", reasons(alarms))
+	}
+	if recs[Key(f[0])].Missed != 0 {
+		t.Error("a sighting resets the clean-scan count")
+	}
+}
+
+// c1c-r13: raising the severity resets the overdue alarm, so the NEW
+// (shorter) deadline alarms when it passes.
+func TestSeverityRaiseResetsOverdue(t *testing.T) {
+	scanned := map[string]bool{"frank": true}
+	recs, _ := Evaluate(nil, []Finding{finding("CVE-3", "HIGH", "1.0")}, scanned, t0)
+	recs, alarms := Evaluate(recs, []Finding{finding("CVE-3", "HIGH", "1.0")}, scanned, t0.Add(15*24*time.Hour))
+	if len(alarms) != 1 || alarms[0].Reason != ReasonOverdue {
+		t.Fatalf("high overdue: %v", reasons(alarms))
+	}
+	recs, alarms = Evaluate(recs, []Finding{finding("CVE-3", "CRITICAL", "1.0")}, scanned, t0.Add(15*24*time.Hour+time.Hour))
+	if len(alarms) != 1 || alarms[0].Reason != ReasonSeverityRaised {
+		t.Fatalf("raise: %v", reasons(alarms))
+	}
+	if recs[Key(finding("CVE-3", "", ""))].OverdueAlarmed {
+		t.Fatal("severity raise must reset the overdue alarm")
+	}
+	_, alarms = Evaluate(recs, []Finding{finding("CVE-3", "CRITICAL", "1.0")}, scanned, t0.Add(15*24*time.Hour+2*time.Hour))
+	if len(alarms) != 1 || alarms[0].Reason != ReasonOverdue {
+		t.Fatalf("overdue at the new severity: %v", reasons(alarms))
 	}
 }
 
@@ -95,7 +140,9 @@ func TestUnscannedClusterKeepsItsRecords(t *testing.T) {
 
 func TestCounts(t *testing.T) {
 	recs, _ := Evaluate(nil, []Finding{finding("CVE-1", "CRITICAL", ""), finding("CVE-2", "HIGH", "1")}, map[string]bool{"frank": true}, t0)
-	recs, _ = Evaluate(recs, []Finding{finding("CVE-2", "HIGH", "1")}, map[string]bool{"frank": true}, t0.Add(time.Hour))
+	for i := 0; i < ResolveAfter; i++ { // CVE-1 absent from ResolveAfter clean scans
+		recs, _ = Evaluate(recs, []Finding{finding("CVE-2", "HIGH", "1")}, map[string]bool{"frank": true}, t0.Add(time.Hour))
+	}
 	c := Counts(recs, t0.Add(time.Hour))
 	if c[StateOpen] != 1 || c[StateResolved] != 1 || c[StateOverdue] != 0 {
 		t.Errorf("counts = %v", c)
