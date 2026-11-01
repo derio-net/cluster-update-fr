@@ -257,11 +257,24 @@ func nonEmpty(s string) []string {
 
 // AttachURL is the runs-fr page for a session (runs-fr lists sessions by
 // their fr.run/id; it has no deep link yet, so the id is in the fragment).
+// Pure: it changes nothing.
 func (a *App) AttachURL(id string) string {
-	if a.Launcher != nil {
-		a.Launcher.Touch(id)
-	}
 	return a.Cfg.RunsFrURL + "/#" + id
+}
+
+// Attach records operator activity on a RUNNING session (it resets the idle
+// clock) and returns its attach URL. Reached only by a CSRF-checked POST.
+func (a *App) Attach(id, by string) (string, error) {
+	if a.Launcher == nil {
+		return "", ErrUnavailable
+	}
+	if _, ok := a.Launcher.Get(id); !ok {
+		return "", session.ErrNoSession
+	}
+	a.Launcher.Touch(id)
+	a.Store.AddEvent(store.Event{Update: id, Action: "session-attached", By: by})
+	_ = a.Store.Save()
+	return a.AttachURL(id), nil
 }
 
 // EndSession ends a session on the operator's request.

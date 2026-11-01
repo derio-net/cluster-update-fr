@@ -22,7 +22,7 @@
 <div><b>{{.Cluster}} {{.Kind}} {{.From}} → {{.To}}</b> <span class="meta">step {{.Position}} · talosctl {{.TalosClient}}, kubectl {{.KubectlClient}} pinned</span></div>
 {{if .OneWay}}<div class="warn">ONE-WAY: a Kubernetes minor cannot be rolled back.</div>{{end}}
 <div class="rollback"><b>Rollback:</b> {{.Rollback}}</div>
-{{if .Session}}<a href="/attach/{{.ID}}">Attach to the running session</a> {{template "btn" (btn "end-session" .ID $csrf "End session" "danger")}}{{else}}{{template "btn" (btn "start-session" .ID $csrf "Start session" "primary")}}{{end}}
+{{if .Session}}{{template "btn" (btn "attach" .ID $csrf "Attach to the running session" "")}} {{template "btn" (btn "end-session" .ID $csrf "End session" "danger")}}{{else}}{{template "btn" (btn "start-session" .ID $csrf "Start session" "primary")}}{{end}}
 </div>
 {{else}}<p class="empty">Both clusters are on the newest OS releases.</p>{{end}}
 {{range .SessionItems}}{{template "item" (item . $csrf)}}{{end}}
@@ -54,7 +54,7 @@
 {{if .Sessions}}<h2>Running sessions</h2>
 <table><tr><th>Upgrade</th><th>Type</th><th>Started</th><th>Step</th><th></th></tr>
 {{range .Sessions}}<tr><td>{{.ID}}</td><td>{{.Type}}</td><td>{{when .StartedAt}}</td><td>{{if .StepRunning}}{{.StepName}} (idle clock paused){{else}}—{{end}}</td>
-<td><a href="/attach/{{.ID}}">Attach</a> {{template "btn" (btn "end-session" .ID $csrf "End" "danger")}}</td></tr>{{end}}</table>{{end}}
+<td>{{template "btn" (btn "attach" .ID $csrf "Attach" "")}} {{template "btn" (btn "end-session" .ID $csrf "End" "danger")}}</td></tr>{{end}}</table>{{end}}
 
 {{if .Alarms}}<h2>Open security alarms</h2>
 <table><tr><th>Severity</th><th>Vulnerability</th><th>Component</th><th>Fix</th><th>Deadline</th></tr>

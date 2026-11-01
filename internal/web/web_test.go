@@ -73,7 +73,10 @@ func (f *fakeBackend) EndSession(_ context.Context, id, by string) error {
 	f.rec("end-session", id, by)
 	return nil
 }
-func (f *fakeBackend) AttachURL(id string) string { return "https://sessions.cluster.derio.net/#" + id }
+func (f *fakeBackend) Attach(id, by string) (string, error) {
+	f.rec("attach", id, by)
+	return "https://sessions.cluster.derio.net/#" + id, nil
+}
 func (f *fakeBackend) StepEvent(id, token string, start bool, name string) error {
 	if token != "good" {
 		return session.ErrBadToken
@@ -389,18 +392,49 @@ func TestStartSessionTwiceAttaches(t *testing.T) {
 	form := url.Values{"id": {"frank-os-talos-1.13.4"}, "csrf": {tok}}
 	w1 := post(h, "/act/start-session", "derio", form)
 	w2 := post(h, "/act/start-session", "derio", form)
-	if w1.Code != http.StatusSeeOther || w2.Code != http.StatusSeeOther {
+	if w1.Code != http.StatusOK || w2.Code != http.StatusOK {
 		t.Fatal(w1.Code, w2.Code)
 	}
 	for _, w := range []*httptest.ResponseRecorder{w1, w2} {
-		if !strings.HasPrefix(w.Header().Get("Location"), "https://sessions.cluster.derio.net/#frank-os-talos-1.13.4") {
-			t.Errorf("start must land on the attach page: %q", w.Header().Get("Location"))
+		// A same-origin page sends the browser on (form-action 'self'
+		// forbids redirecting the form submission to runs-fr).
+		if w.Header().Get("Location") != "" || !strings.Contains(w.Body.String(), "https://sessions.cluster.derio.net/#frank-os-talos-1.13.4") {
+			t.Errorf("start must land on the attach page: loc %q body %q", w.Header().Get("Location"), w.Body.String())
 		}
 	}
 	b.lockErr = &session.LockedError{Target: "os:frank", Holder: "frank-os-talos-1.13.4"}
 	post(h, "/act/start-session", "derio", url.Values{"id": {"frank-os-k8s-1.36.2"}, "csrf": {tok}})
 	if m := flash(h, "derio"); !strings.Contains(m, "frank-os-talos-1.13.4") {
 		t.Errorf("lock conflict must name the holder: %q", m)
+	}
+}
+
+// c1s-r8: attaching mutates state (it resets the idle clock), so it is a
+// CSRF-checked POST; a GET (a link, an <img>, a prefetch) changes nothing.
+// The CSP restricts form targets to the console itself.
+func TestAttachIsAPostAndCSPFormActionIsSelf(t *testing.T) {
+	b, h := newServer(t)
+	if w := get(h, "/attach/frank-os-talos-1.13.4", "derio"); w.Code == http.StatusSeeOther || w.Code == http.StatusOK {
+		t.Errorf("GET /attach = %d", w.Code)
+	}
+	if w := post(h, "/act/attach", "derio", url.Values{"id": {"frank-os-talos-1.13.4"}}); w.Code != http.StatusForbidden {
+		t.Errorf("attach without CSRF = %d", w.Code)
+	}
+	for _, c := range b.calls {
+		if c.action == "attach" {
+			t.Fatal("attach reached the backend without a POST + CSRF")
+		}
+	}
+	tok := csrfFor(t, h, "derio")
+	w := post(h, "/act/attach", "derio", url.Values{"id": {"frank-os-talos-1.13.4"}, "csrf": {tok}})
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "https://sessions.cluster.derio.net/#frank-os-talos-1.13.4") {
+		t.Fatalf("attach: %d %q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `content="0;url=https://sessions.cluster.derio.net/#frank-os-talos-1.13.4"`) {
+		t.Errorf("meta refresh not rendered: %q", w.Body.String())
+	}
+	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self';") {
+		t.Errorf("CSP = %q", csp)
 	}
 }
 

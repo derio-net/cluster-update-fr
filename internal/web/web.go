@@ -55,7 +55,10 @@ type Backend interface {
 	Revert(ctx context.Context, id, by string) (string, error)
 	StartSession(ctx context.Context, id, by string) (session.Record, bool, error)
 	EndSession(ctx context.Context, id, by string) error
-	AttachURL(id string) string
+	// Attach records operator activity on a running session and returns its
+	// runs-fr URL. It mutates state, so it is only reached by a CSRF-checked
+	// POST (c1s-r8).
+	Attach(id, by string) (string, error)
 	StepEvent(id, token string, start bool, name string) error
 	SessionFinished(ctx context.Context, id, token, outcome, transcript string) error
 }
@@ -119,9 +122,6 @@ func New(b Backend, opts Options) Handlers {
 	ui.Handle("GET /{$}", s.page("needs-action"))
 	ui.Handle("GET /inventory", s.page("inventory"))
 	ui.Handle("GET /history", s.page("history"))
-	ui.HandleFunc("GET /attach/{id}", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, s.b.AttachURL(r.PathValue("id")), http.StatusSeeOther)
-	})
 	ui.HandleFunc("POST /act/{action}", s.act)
 	ui.HandleFunc("/act/", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -141,7 +141,7 @@ func stripIdentity(next http.Handler) http.Handler {
 func headers(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
@@ -303,10 +303,16 @@ func (s *server) act(w http.ResponseWriter, r *http.Request) {
 		var created bool
 		rec, created, err = s.b.StartSession(ctx, id, user)
 		if err == nil {
-			_ = created // created or attached: the operator lands on the attach page either way
-			http.Redirect(w, r, s.b.AttachURL(rec.ID), http.StatusSeeOther)
+			m := "Session " + rec.ID + " is running."
+			if created {
+				m = "Session " + rec.ID + " started."
+			}
+			s.attachPage(w, r, rec.ID, user, m)
 			return
 		}
+	case "attach":
+		s.attachPage(w, r, id, user, "Attaching to session "+id+".")
+		return
 	case "end-session":
 		err, msg = s.b.EndSession(ctx, id, user), "session "+id+" ended and cleaned up"
 	default:
@@ -323,6 +329,24 @@ func (s *server) act(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.back(w, r, msg)
+}
+
+// attachPage answers a POST with a same-origin page that sends the browser
+// on to runs-fr (meta refresh + link) — never a redirect of the form
+// submission to another origin, which CSP form-action 'self' forbids.
+func (s *server) attachPage(w http.ResponseWriter, r *http.Request, id, user, msg string) {
+	u, err := s.b.Attach(id, user)
+	if err != nil {
+		s.back(w, r, "failed: "+err.Error())
+		return
+	}
+	var buf bytes.Buffer
+	if err := pages.ExecuteTemplate(&buf, "attach.html", map[string]string{"URL": u, "ID": id, "Msg": msg}); err != nil {
+		http.Error(w, "render failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, scrub.String(buf.String()))
 }
 
 func bearer(r *http.Request) string {
