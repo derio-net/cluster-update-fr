@@ -65,7 +65,7 @@ type Backend interface {
 	// RequestMerge: a session asks the console to merge its PR (step token).
 	RequestMerge(ctx context.Context, id, token string, pr int) error
 	// MergeSessionPR: the operator's "Merge session PR" click.
-	MergeSessionPR(ctx context.Context, pr int, by string) error
+	MergeSessionPR(ctx context.Context, key, by string) error // key "<session>#<pr>"
 	SessionFinished(ctx context.Context, id, token, outcome, transcript string) error
 }
 
@@ -332,12 +332,13 @@ func (s *server) act(w http.ResponseWriter, r *http.Request) {
 	case "merge-revert":
 		err, msg = s.b.MergeRevert(ctx, id, user), "revert of "+id+" merged; rolled back once verified"
 	case "merge-session-pr":
-		n, perr := strconv.Atoi(id)
-		if perr != nil || n <= 0 {
-			http.Error(w, "bad pull request number", http.StatusBadRequest)
+		// id is the request's (session, PR) key "<session>#<pr>".
+		sess, n, ok := strings.Cut(id, "#")
+		if num, perr := strconv.Atoi(n); !ok || sess == "" || perr != nil || num <= 0 {
+			http.Error(w, "bad session PR key", http.StatusBadRequest)
 			return
 		}
-		err, msg = s.b.MergeSessionPR(ctx, n, user), "merged session PR #"+id
+		err, msg = s.b.MergeSessionPR(ctx, id, user), "merged session PR #"+n+" of "+sess
 	case "end-session":
 		err, msg = s.b.EndSession(ctx, id, user), "session "+id+" ended and cleaned up"
 	default:

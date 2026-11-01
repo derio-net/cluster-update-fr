@@ -584,7 +584,7 @@ func TestSessionPRMergeRoute(t *testing.T) {
 			if !c.wantTrusted && !strings.Contains(v.SessionPRs[0].Untrusted, c.wantRefusalIn) {
 				t.Errorf("reason %q should mention %q", v.SessionPRs[0].Untrusted, c.wantRefusalIn)
 			}
-			err = a.MergeSessionPR(context.Background(), n, "derio")
+			err = a.MergeSessionPR(context.Background(), v.SessionPRs[0].Key(), "derio")
 			gh.mu.Lock()
 			merged := len(gh.merged) > 0 && gh.merged[len(gh.merged)-1] == n
 			gh.mu.Unlock()
@@ -779,6 +779,78 @@ func TestForeignRevertPRIsRefused(t *testing.T) {
 	if err := a.MergeRevert(context.Background(), "pr-7", "derio"); err == nil {
 		t.Fatal("a revert PR with a foreign commit was merged")
 	}
+}
+
+// sec2-4/5/6: merge requests are keyed by (session, PR) and a PR belongs to
+// the first session that asked; a stored request is not merged for a
+// session that ended (its requests are dropped) or into a terminal update.
+func TestSessionPRRequestsAreOwnedAndBounded(t *testing.T) {
+	const id, other = "frank-os-talos-1.13.4", "hop-os-talos-1.13.4"
+	setup := func(t *testing.T) (*App, *fakeGitHub, int) {
+		now := t0
+		a, gh, _, _ := newApp(t, &now, false)
+		a.Cycle(context.Background())
+		if _, _, err := a.StartSession(context.Background(), id, "derio"); err != nil {
+			t.Fatal(err)
+		}
+		n := 70
+		p := forge.PR{Number: n, Title: "talos", HeadSHA: "s70", HeadRef: engine.SessionBranchPrefix + id + "/version", Author: sessionBot, State: "open",
+			HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank", BaseRef: "main", CreatedAt: t0, UpdatedAt: t0}
+		gh.mu.Lock()
+		gh.prs = append(gh.prs, p)
+		gh.commits = map[int][]forge.Commit{n: {signedCommit("s70", sessionBot)}}
+		gh.files = map[int][]string{n: {"versions/frank.yaml"}}
+		gh.mu.Unlock()
+		if err := a.RequestMerge(context.Background(), id, a.Launcher.StepToken(id), n); err != nil {
+			t.Fatal(err)
+		}
+		return a, gh, n
+	}
+	t.Run("another session cannot take over a PR", func(t *testing.T) {
+		a, _, n := setup(t)
+		if _, _, err := a.StartSession(context.Background(), other, "derio"); err != nil {
+			t.Fatal(err)
+		}
+		err := a.RequestMerge(context.Background(), other, a.Launcher.StepToken(other), n)
+		if !errors.Is(err, ErrBadRequest) || !strings.Contains(err.Error(), id) {
+			t.Fatalf("second session's request for the same PR: %v", err)
+		}
+		if prs := a.View().SessionPRs; len(prs) != 1 || prs[0].Session != id {
+			t.Fatalf("the first session's request was overwritten: %+v", prs)
+		}
+	})
+	t.Run("ended session", func(t *testing.T) {
+		a, gh, _ := setup(t)
+		key := a.View().SessionPRs[0].Key()
+		if err := a.EndSession(context.Background(), id, "derio"); err != nil {
+			t.Fatal(err)
+		}
+		if prs := a.View().SessionPRs; len(prs) != 0 {
+			t.Fatalf("an ended session's requests stay: %+v", prs)
+		}
+		if err := a.MergeSessionPR(context.Background(), key, "derio"); err == nil || mergedPR(gh, 70) {
+			t.Fatalf("merged for an ended session: %v %v", err, gh.merged)
+		}
+	})
+	t.Run("terminal update", func(t *testing.T) {
+		a, gh, _ := setup(t)
+		key := a.View().SessionPRs[0].Key()
+		_ = a.Store.Transition(id, store.Abandoned, "x", "abandoned for the test", nil)
+		if err := a.MergeSessionPR(context.Background(), key, "derio"); err == nil || mergedPR(gh, 70) {
+			t.Fatalf("merged into a terminal update: %v %v", err, gh.merged)
+		}
+	})
+}
+
+func mergedPR(g *fakeGitHub, n int) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, m := range g.merged {
+		if m == n {
+			return true
+		}
+	}
+	return false
 }
 
 type noVulnGetter struct{ fixtureGetter }

@@ -55,7 +55,7 @@
 <p class="meta">A session opens PRs but never merges them. Each was verified against its session's scope (session bot, its own branch, signed commits, files within the update); merging re-verifies and pins the verified head.</p>
 <table><tr><th>PR</th><th>Session</th><th>Title</th><th>Branch</th><th></th></tr>
 {{range .SessionPRs}}<tr><td>#{{.PR}}</td><td>{{.Session}}</td><td>{{.Title}}</td><td><code>{{.Branch}}</code></td>
-<td>{{if .Untrusted}}<span class="bad">untrusted — will not merge:</span> <span class="meta">{{.Untrusted}}</span>{{else}}{{template "btn" (btn "merge-session-pr" (printf "%d" .PR) $csrf "Merge session PR" "primary")}}{{end}}</td></tr>{{end}}</table>{{end}}
+<td>{{if .Untrusted}}<span class="bad">untrusted — will not merge:</span> <span class="meta">{{.Untrusted}}</span>{{else}}{{template "btn" (btn "merge-session-pr" .Key $csrf "Merge session PR" "primary")}}{{end}}</td></tr>{{end}}</table>{{end}}
 
 {{if .Sessions}}<h2>Running sessions</h2>
 <table><tr><th>Upgrade</th><th>Type</th><th>Started</th><th>Step</th><th></th></tr>

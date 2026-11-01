@@ -96,8 +96,8 @@ func (f *fakeBackend) RequestMerge(_ context.Context, id, token string, pr int) 
 	f.rec("request-merge", id, fmt.Sprint(pr))
 	return nil
 }
-func (f *fakeBackend) MergeSessionPR(_ context.Context, pr int, by string) error {
-	f.rec("merge-session-pr", fmt.Sprint(pr), by)
+func (f *fakeBackend) MergeSessionPR(_ context.Context, key, by string) error {
+	f.rec("merge-session-pr", key, by)
 	return nil
 }
 func (f *fakeBackend) SessionFinished(_ context.Context, id, token, outcome, transcript string) error {
@@ -478,12 +478,16 @@ func TestSessionPRMergeFlow(t *testing.T) {
 		t.Errorf("a session must have no merge endpoint: %d", c)
 	}
 	h := hs.UI
-	if w := post(h, "/act/merge-session-pr", "derio", url.Values{"id": {"42"}}); w.Code != http.StatusForbidden {
+	if w := post(h, "/act/merge-session-pr", "derio", url.Values{"id": {"frank-os-1#42"}}); w.Code != http.StatusForbidden {
 		t.Errorf("merge without CSRF = %d", w.Code)
 	}
 	tok := csrfFor(t, h, "derio")
-	post(h, "/act/merge-session-pr", "derio", url.Values{"id": {"42"}, "csrf": {tok}})
-	if last := b.calls[len(b.calls)-1]; last != (call{"merge-session-pr", "42", "derio"}) {
+	n := len(b.calls)
+	if w := post(h, "/act/merge-session-pr", "derio", url.Values{"id": {"42"}, "csrf": {tok}}); w.Code != http.StatusBadRequest || len(b.calls) != n {
+		t.Errorf("a bare PR number (no session) = %d", w.Code)
+	}
+	post(h, "/act/merge-session-pr", "derio", url.Values{"id": {"frank-os-1#42"}, "csrf": {tok}})
+	if last := b.calls[len(b.calls)-1]; last != (call{"merge-session-pr", "frank-os-1#42", "derio"}) {
 		t.Errorf("calls = %+v", b.calls)
 	}
 }
