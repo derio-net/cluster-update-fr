@@ -602,6 +602,57 @@ func TestStaleBranchesAreDeleted(t *testing.T) {
 	}
 }
 
+// c1c-r18: everything that must survive a console restart does — the store
+// is closed and REOPENED from disk between cycles: alarms do not fire again,
+// the daily report is not re-sent, session records and target locks hold.
+func TestStateSurvivesARestart(t *testing.T) {
+	now := t0
+	dir := t.TempDir()
+	open := func() *store.Store {
+		st, err := store.Open(dir, func() time.Time { return now })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	a, gh, tg, k := newApp(t, &now, false)
+	st := open()
+	a.Store, a.Launcher.Store = st, st
+	a.Cycle(context.Background())
+	const id = "frank-os-talos-1.13.4"
+	if _, _, err := a.StartSession(context.Background(), id, "derio"); err != nil {
+		t.Fatal(err)
+	}
+	sent := len(tg.msgs)
+	if sent == 0 {
+		t.Fatal("precondition: the first cycle alarms and reports")
+	}
+	st.Close() // the console stops
+
+	st2 := open()
+	defer st2.Close()
+	b := &App{Cfg: a.Cfg, Repo: a.Repo, Frank: a.Frank, GitHub: gh, Store: st2, Telegram: tg, Now: a.Now, Smoke: a.Smoke,
+		Launcher: &session.Launcher{Kube: k, Store: st2, Namespace: "upgrade-sessions", Image: a.Cfg.SessionImage, CredDir: a.Launcher.CredDir,
+			Now: a.Now, IdleTimeout: 2 * time.Hour, MaxLifetime: 8 * time.Hour}}
+	now = now.Add(10 * time.Minute)
+	b.Cycle(context.Background())
+	if extra := tg.msgs[sent:]; len(extra) != 0 {
+		t.Fatalf("after a restart the console re-sent: %v", extra)
+	}
+	if h := (session.Locks{Store: st2}).Holder(session.Target(session.TypeFrankOS, "frank", "")); h != id {
+		t.Fatalf("lock after restart held by %q", h)
+	}
+	if r, ok := b.Launcher.Get(id); !ok || r.TokenHash == "" || r.PodUID == "" {
+		t.Fatalf("session record after restart = %+v %v", r, ok)
+	}
+	if v := b.View(); len(v.Alarms) == 0 || v.LastReport.IsZero() {
+		t.Fatalf("alarms %d, last report %v after restart", len(v.Alarms), v.LastReport)
+	}
+	if _, created, err := b.StartSession(context.Background(), id, "derio"); err != nil || created {
+		t.Fatalf("re-attach after restart: created=%v err=%v", created, err)
+	}
+}
+
 type containsAll struct{}
 
 func (containsAll) Contains(context.Context, string, string) (bool, error) { return true, nil }

@@ -238,8 +238,9 @@ func readApps(ctx context.Context, g Getter) ([]Application, error) {
 			} `json:"spec"`
 			Status struct {
 				Sync struct {
-					Status   string `json:"status"`
-					Revision string `json:"revision"`
+					Status    string   `json:"status"`
+					Revision  string   `json:"revision"`
+					Revisions []string `json:"revisions"` // multi-source, aligned with spec.sources
 				} `json:"sync"`
 				Health struct {
 					Status string `json:"status"`
@@ -293,6 +294,11 @@ func readApps(ctx context.Context, g Getter) ([]Application, error) {
 			}
 		}
 		for i, src := range sources {
+			// Multi-source apps report status.sync.revisions (plural); the
+			// displayed sync revision is the git (non-chart) source's.
+			if a.SyncRevision == "" && src.Chart == "" && i < len(st.Sync.Revisions) {
+				a.SyncRevision = st.Sync.Revisions[i]
+			}
 			s := Source{RepoURL: src.RepoURL, TargetRevision: src.TargetRevision, Chart: src.Chart, Path: src.Path}
 			if i < len(opRevs) {
 				s.Applied = opRevs[i]

@@ -66,17 +66,20 @@ func TestApplications(t *testing.T) {
 	if l.Name != "litellm" || l.SyncStatus != "Synced" || l.Health != "Healthy" || l.OperationPhase != "Succeeded" {
 		t.Errorf("litellm = %+v", l)
 	}
-	// Synced at 1111…, but the last sync OPERATION applied 0000… — the
+	// Synced at 9c3e…, but the last sync OPERATION applied 4b7d… — the
 	// stale-revision gotcha. AppliedRevision reads the operation, never the
-	// sync status.
-	if got := l.AppliedRevision("derio-net/frank"); got != "0000000000000000000000000000000000000000" {
+	// sync status (multi-source: status.sync.revisions, plural).
+	if got := l.AppliedRevision("derio-net/frank"); got != "4b7d0e2c9a1f36d58e2b7c4a0f9d1e3b6a5c8f72" {
 		t.Errorf("litellm applied = %q", got)
+	}
+	if l.SyncRevision != "9c3e1f7a5b2d48e06f1a3c9b7d5e2f4a8c6b1d03" {
+		t.Errorf("litellm sync revision (multi-source revisions) = %q", l.SyncRevision)
 	}
 	if len(l.Charts) != 1 || l.Charts[0].Name != "litellm-helm" || l.Charts[0].Declared != "0.1.700" || l.Charts[0].Running != "0.1.699" {
 		t.Errorf("litellm charts = %+v", l.Charts)
 	}
 	h := s.Apps[1]
-	if got := h.AppliedRevision("derio-net/frank"); got != "2222222222222222222222222222222222222222" {
+	if got := h.AppliedRevision("derio-net/frank"); got != "5e8b2d6f0a4c19e73b5d8f2a6c0e4b9d1f3a7c58" { // single source: revision, singular
 		t.Errorf("homepage applied = %q", got)
 	}
 	if len(h.Images) != 1 || len(h.Charts) != 0 {
