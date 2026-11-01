@@ -90,6 +90,10 @@ func (g *fakeGitHub) LastPush(_ context.Context, branch string) (forge.Push, err
 	return forge.Push{}, forge.ErrNotFound
 }
 
+func (g *fakeGitHub) PRPatches(context.Context, int) (map[string]forge.FilePatch, error) {
+	return map[string]forge.FilePatch{}, nil
+}
+
 func (g *fakeGitHub) PRFiles(_ context.Context, n int) ([]string, error) {
 	if f, ok := g.files[n]; ok {
 		return f, nil

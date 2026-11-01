@@ -39,6 +39,7 @@ type GitHubAPI interface {
 	Releases(ctx context.Context, ownerRepo string) ([]string, error)
 	PRCommits(ctx context.Context, n int) ([]forge.Commit, error)
 	PRFiles(ctx context.Context, n int) ([]string, error)
+	PRPatches(ctx context.Context, n int) (map[string]forge.FilePatch, error)
 	LastPush(ctx context.Context, branch string) (forge.Push, error)
 }
 

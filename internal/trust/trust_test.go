@@ -19,6 +19,7 @@ type fakeAPI struct {
 	commits map[int][]forge.Commit
 	files   map[int][]string
 	pushes  map[string]forge.Push
+	patches map[int]map[string]forge.FilePatch
 	merged  []string
 }
 
@@ -40,6 +41,9 @@ func (f *fakeAPI) PRCommits(_ context.Context, n int) ([]forge.Commit, error) {
 	return f.commits[n], nil
 }
 func (f *fakeAPI) PRFiles(_ context.Context, n int) ([]string, error) { return f.files[n], nil }
+func (f *fakeAPI) PRPatches(_ context.Context, n int) (map[string]forge.FilePatch, error) {
+	return f.patches[n], nil
+}
 
 func cfg() Config {
 	return Config{Repo: "derio-net/frank", RenovateBot: bot, ConsoleBot: console, Committers: []string{"web-flow"}}
@@ -224,6 +228,43 @@ func TestSensitivePathsOnlyForThatDependencyOnTheSessionPath(t *testing.T) {
 	mine.Path = frankrepo.PathSession
 	if err := cfg().Check(ctx, self, pr, ScopeFor(mine)); err != nil {
 		t.Fatalf("session-path bump of the console itself: %v", err)
+	}
+}
+
+// c1c-r7: a chart bump changes the chart version in the app's own
+// apps/root/templates/<app>.yaml. On the auto-merge/batch paths that file is
+// allowed — but ONLY a diff confined to its targetRevision line.
+func TestChartBumpMayChangeOnlyItsOwnTargetRevision(t *testing.T) {
+	ctx := context.Background()
+	pr := goodPR(7)
+	chart := engine.Item{Kind: "chart", Cluster: "frank", App: "grafana", Path: frankrepo.PathAutoMerge}
+	files := []string{"apps/root/templates/grafana.yaml", "apps/grafana/values.yaml"}
+	bump := "@@ -12,7 +12,7 @@ spec:\n     chart: grafana\n-    targetRevision: 8.5.1\n+    targetRevision: 8.5.2\n     helm:"
+	cases := []struct {
+		name  string
+		patch forge.FilePatch
+		item  engine.Item
+		ok    bool
+	}{
+		{"targetRevision only", forge.FilePatch{Status: "modified", Patch: bump}, chart, true},
+		{"also changes the repoURL", forge.FilePatch{Status: "modified", Patch: bump + "\n-    repoURL: https://grafana.github.io/helm-charts\n+    repoURL: https://evil.example/charts"}, chart, false},
+		{"also changes syncPolicy", forge.FilePatch{Status: "modified", Patch: bump + "\n+      prune: true"}, chart, false},
+		{"file replaced wholesale", forge.FilePatch{Status: "added", Patch: "+    targetRevision: 8.5.2"}, chart, false},
+		{"no patch shown", forge.FilePatch{Status: "modified"}, chart, false},
+		{"another app's template", forge.FilePatch{Status: "modified", Patch: bump}, engine.Item{Kind: "chart", Cluster: "frank", App: "loki", Path: frankrepo.PathAutoMerge}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := api(7, pr, botCommit, files)
+			a.patches = map[int]map[string]forge.FilePatch{7: {"apps/root/templates/grafana.yaml": c.patch}}
+			if c.item.App == "loki" {
+				a.files[7] = []string{"apps/root/templates/grafana.yaml"}
+			}
+			err := cfg().Check(ctx, a, pr, ScopeFor(c.item))
+			if (err == nil) != c.ok {
+				t.Fatalf("err = %v, want ok=%v", err, c.ok)
+			}
+		})
 	}
 }
 

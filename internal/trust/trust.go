@@ -65,6 +65,7 @@ type API interface {
 	PR(ctx context.Context, n int) (forge.PR, error)
 	PRCommits(ctx context.Context, n int) ([]forge.Commit, error)
 	PRFiles(ctx context.Context, n int) ([]string, error)
+	PRPatches(ctx context.Context, n int) (map[string]forge.FilePatch, error)
 	LastPush(ctx context.Context, branch string) (forge.Push, error)
 }
 
@@ -72,7 +73,38 @@ type API interface {
 type Scope struct {
 	Prefixes  []string // allowed path prefixes (a trailing "/" = directory) or exact paths
 	Sensitive []string // sensitive paths this item may touch (session path, own dependency)
-	Known     bool     // false: the dependency's location is unknown
+	// TargetRevisionOnly are exact files (the item's own root Application
+	// template) it may change ONLY on their targetRevision line — how a
+	// chart bump lands on the auto-merge and batch paths (c1c-r7).
+	TargetRevisionOnly []string
+	Known              bool // false: the dependency's location is unknown
+}
+
+var targetRevisionLine = regexp.MustCompile(`^[+-][ \t]*targetRevision:[ \t]*["']?[A-Za-z0-9._+-]+["']?[ \t]*$`)
+
+// targetRevisionOnly: the patch modifies the file and every changed line is
+// a targetRevision line (one removed, one added at least).
+func targetRevisionOnly(p forge.FilePatch) error {
+	if p.Status != "modified" || p.Patch == "" {
+		return fmt.Errorf("is %s with no reviewable patch", p.Status)
+	}
+	plus, minus := 0, 0
+	for _, l := range strings.Split(p.Patch, "\n") {
+		switch {
+		case strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "\\ No newline"), !strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "-"):
+			continue
+		case !targetRevisionLine.MatchString(l):
+			return fmt.Errorf("changes more than its targetRevision line (%.60q)", l)
+		case strings.HasPrefix(l, "+"):
+			plus++
+		default:
+			minus++
+		}
+	}
+	if plus == 0 || minus == 0 {
+		return errors.New("does not replace a targetRevision")
+	}
+	return nil
 }
 
 // sensitive paths need the session path AND the matching dependency.
@@ -111,12 +143,14 @@ func ScopeFor(it engine.Item) Scope {
 	} else {
 		s.Prefixes = dirs
 	}
+	root := "apps/root/templates/" + it.App + ".yaml"
+	if it.Cluster == "hop" {
+		root = "clusters/hop/apps/root/templates/" + it.App + ".yaml"
+	}
 	if session {
-		if it.Cluster == "hop" {
-			s.Sensitive = append(s.Sensitive, "clusters/hop/apps/root/templates/"+it.App+".yaml")
-		} else {
-			s.Sensitive = append(s.Sensitive, "apps/root/templates/"+it.App+".yaml")
-		}
+		s.Sensitive = append(s.Sensitive, root)
+	} else {
+		s.TargetRevisionOnly = append(s.TargetRevisionOnly, root)
 	}
 	return s
 }
@@ -128,8 +162,18 @@ func Union(scopes ...Scope) Scope {
 		out.Known = out.Known && s.Known
 		out.Prefixes = append(out.Prefixes, s.Prefixes...)
 		out.Sensitive = append(out.Sensitive, s.Sensitive...)
+		out.TargetRevisionOnly = append(out.TargetRevisionOnly, s.TargetRevisionOnly...)
 	}
 	return out
+}
+
+func exactly(path string, files []string) bool {
+	for _, f := range files {
+		if path == f {
+			return true
+		}
+	}
+	return false
 }
 
 func within(path string, allowed []string) bool {
@@ -204,12 +248,24 @@ func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) er
 	if err != nil {
 		return fmt.Errorf("changed files unreadable: %w", err)
 	}
+	var patches map[string]forge.FilePatch
 	for _, f := range files {
 		if within(f, sensitive) {
-			if !within(f, scope.Sensitive) {
-				return fmt.Errorf("touches sensitive path %s", f)
+			if within(f, scope.Sensitive) {
+				continue
 			}
-			continue
+			if exactly(f, scope.TargetRevisionOnly) {
+				if patches == nil {
+					if patches, err = api.PRPatches(ctx, pr.Number); err != nil {
+						return fmt.Errorf("patches unreadable: %w", err)
+					}
+				}
+				if err := targetRevisionOnly(patches[f]); err != nil {
+					return fmt.Errorf("touches sensitive path %s: it %v", f, err)
+				}
+				continue
+			}
+			return fmt.Errorf("touches sensitive path %s", f)
 		}
 		if !within(f, scope.Prefixes) && !within(f, scope.Sensitive) {
 			return fmt.Errorf("changes %s, outside the dependency's location", f)

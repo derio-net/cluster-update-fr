@@ -450,6 +450,29 @@ func (g *GitHub) PRFiles(ctx context.Context, n int) ([]string, error) {
 	return out, nil
 }
 
+// FilePatch is one changed file with its unified diff hunk text.
+type FilePatch struct {
+	Status string // added | removed | modified | renamed | …
+	Patch  string // "" when GitHub omits it (binary, too large)
+}
+
+// PRPatches returns each changed file's status and patch, by path.
+func (g *GitHub) PRPatches(ctx context.Context, n int) (map[string]FilePatch, error) {
+	var raw []struct {
+		Filename string `json:"filename"`
+		Status   string `json:"status"`
+		Patch    string `json:"patch"`
+	}
+	if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/pulls/%d/files?per_page=100", n)), nil, &raw, false); err != nil {
+		return nil, err
+	}
+	out := map[string]FilePatch{}
+	for _, f := range raw {
+		out[f.Filename] = FilePatch{Status: f.Status, Patch: f.Patch}
+	}
+	return out, nil
+}
+
 // Push is the most recent push to a branch.
 type Push struct {
 	After string    // the SHA the ref moved to

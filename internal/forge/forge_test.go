@@ -312,6 +312,16 @@ func TestPRProvenance(t *testing.T) {
 	}
 }
 
+func TestPRPatches(t *testing.T) {
+	srv, _ := fake(t, map[string]string{
+		"GET /repos/derio-net/frank/pulls/7/files": `[{"filename":"apps/root/templates/grafana.yaml","status":"modified","patch":"@@ -1 +1 @@\n-    targetRevision: 1\n+    targetRevision: 2"}]`,
+	})
+	ps, err := gh(srv, "t").PRPatches(context.Background(), 7)
+	if p := ps["apps/root/templates/grafana.yaml"]; err != nil || p.Status != "modified" || !strings.Contains(p.Patch, "+    targetRevision: 2") {
+		t.Fatalf("patches = %+v %v", ps, err)
+	}
+}
+
 func TestLastPush(t *testing.T) {
 	srv, calls := fake(t, map[string]string{
 		"GET /repos/derio-net/frank/activity": `[{"after":"abc","activity_type":"push","timestamp":"2026-10-31T09:30:00Z","actor":{"login":"renovate-frank[bot]"}}]`,
