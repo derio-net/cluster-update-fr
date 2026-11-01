@@ -170,9 +170,9 @@ func TestLedgerDrivesUpdates(t *testing.T) {
 	if ok, by := s.Approved("pr-3"); !ok || by != "derio" {
 		t.Error("approval")
 	}
-	s.AddRetry("pr-2", "sha")
-	if s.Retries("pr-2", "sha") != 1 || s.Retries("pr-2", "other") != 0 {
-		t.Error("retries are per head sha")
+	s.AddRetry("pr-2")
+	if s.Retries("pr-2") != 1 || s.Retries("pr-3") != 0 {
+		t.Error("retries are per update")
 	}
 }
 

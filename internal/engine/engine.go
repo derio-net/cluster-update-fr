@@ -60,8 +60,10 @@ type Ledger interface {
 	SetHold(id string, held bool, by string)
 	Approved(id string) (bool, string)
 	SetApproved(id, by string)
-	Retries(id, sha string) int
-	AddRetry(id, sha string)
+	// Retries counts CI retries per UPDATE, never per head SHA: the retry
+	// (a Renovate rebase) moves the head, and must not reset the budget.
+	Retries(id string) int
+	AddRetry(id string)
 	Record(e Event)
 }
 
@@ -294,7 +296,7 @@ func (e *Engine) state(it Item, now time.Time) string {
 		return StateHeld
 	}
 	ciBad := it.CI == cidiag.Failed || it.CI == cidiag.Missing
-	if ciBad && e.Ledger.Retries(it.ID, it.PR.HeadSHA) > 0 {
+	if ciBad && e.Ledger.Retries(it.ID) > 0 {
 		return StateFailedCI
 	}
 	if ciBad {
@@ -373,9 +375,9 @@ func (e *Engine) autoRetry(ctx context.Context, it Item) {
 	if it.CI != cidiag.Failed && it.CI != cidiag.Missing {
 		return
 	}
-	n := e.Ledger.Retries(it.ID, it.PR.HeadSHA)
+	n := e.Ledger.Retries(it.ID)
 	if n == 1 {
-		e.Ledger.AddRetry(it.ID, it.PR.HeadSHA) // mark the failure recorded
+		e.Ledger.AddRetry(it.ID) // mark the failure recorded
 		e.record(it, "failed-ci", ApproverAuto, it.PR.HeadSHA, "CI failed again after one retry: "+it.CIDetail)
 		return
 	}
@@ -395,7 +397,7 @@ func (e *Engine) retry(ctx context.Context, it Item, d cidiag.Diagnosis, by stri
 		e.record(it, "ci-retry-failed", by, it.PR.HeadSHA, string(d.Cause)+": "+err.Error())
 		return err
 	}
-	e.Ledger.AddRetry(it.ID, it.PR.HeadSHA)
+	e.Ledger.AddRetry(it.ID)
 	e.record(it, "ci-retry", by, it.PR.HeadSHA, string(d.Cause)+": "+d.Detail+" → "+a.Detail)
 	return nil
 }
@@ -406,7 +408,7 @@ func (e *Engine) RetryCI(ctx context.Context, items []Item, id, by string) error
 	if err != nil {
 		return err
 	}
-	if e.Ledger.Retries(it.ID, it.PR.HeadSHA) > 0 {
+	if e.Ledger.Retries(it.ID) > 0 {
 		return ErrRetryExhausted
 	}
 	if e.Diagnose == nil || e.Act == nil {

@@ -84,8 +84,8 @@ func (l *memLedger) SetHold(id string, held bool, by string) {
 }
 func (l *memLedger) Approved(id string) (bool, string) { by, ok := l.approved[id]; return ok, by }
 func (l *memLedger) SetApproved(id, by string)         { l.approved[id] = by }
-func (l *memLedger) Retries(id, sha string) int        { return l.retries[id+"@"+sha] }
-func (l *memLedger) AddRetry(id, sha string)           { l.retries[id+"@"+sha]++ }
+func (l *memLedger) Retries(id string) int             { return l.retries[id] }
+func (l *memLedger) AddRetry(id string)                { l.retries[id]++ }
 func (l *memLedger) Record(e Event)                    { l.events = append(l.events, e) }
 
 func (l *memLedger) actions() []string {
@@ -370,6 +370,35 @@ func TestCIRetryAtMostOnce(t *testing.T) {
 	}
 	if err := e.RetryCI(context.Background(), items, items[0].ID, "derio"); !errors.Is(err, ErrRetryExhausted) {
 		t.Errorf("manual retry after exhaustion: %v", err)
+	}
+}
+
+// c1c-r2: the one-retry budget belongs to the UPDATE, not to a head SHA —
+// the retry itself (Renovate rebase) moves the head, and a genuine failure
+// must not earn a fresh retry with every rebase.
+func TestRetryBudgetSurvivesAMovingHead(t *testing.T) {
+	f, l := &fakeForge{}, newLedger()
+	now := t0.Add(48 * time.Hour)
+	e := newEngine(f, l, &now, emptyInv())
+	attempts := 0
+	e.Diagnose = func(context.Context, forge.PR) cidiag.Diagnosis { return cidiag.Diagnosis{Cause: cidiag.RanFailed} }
+	e.Act = func(context.Context, forge.PR, cidiag.Diagnosis) (cidiag.Action, error) {
+		attempts++
+		return cidiag.Action{Kind: cidiag.ActionRebase}, nil
+	}
+	p := pr(7, "x/y", "1.0.0", "1.0.1", t0)
+	e.Tick(context.Background(), build(e, []forge.PR{p}, map[string]cidiag.Verdict{"sha7": cidiag.Failed}))
+	p.HeadSHA = "sha7-rebased" // the rebase the retry asked for
+	items := build(e, []forge.PR{p}, map[string]cidiag.Verdict{"sha7-rebased": cidiag.Failed})
+	e.Tick(context.Background(), items)
+	if attempts != 1 {
+		t.Fatalf("a rebased head earned another retry: %d attempts", attempts)
+	}
+	if items[0].State != StateFailedCI {
+		t.Errorf("state after the retried CI failed on the new head = %s", items[0].State)
+	}
+	if err := e.RetryCI(context.Background(), items, items[0].ID, "derio"); !errors.Is(err, ErrRetryExhausted) {
+		t.Errorf("manual retry on the new head: %v", err)
 	}
 }
 

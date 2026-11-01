@@ -214,6 +214,13 @@ func (s *Store) fill() {
 	if s.d.Retries == nil {
 		s.d.Retries = e.Retries
 	}
+	// Earlier state files keyed retries "id@sha"; fold them into the id.
+	for k, n := range s.d.Retries {
+		if id, _, ok := strings.Cut(k, "@"); ok {
+			delete(s.d.Retries, k)
+			s.d.Retries[id] += n
+		}
+	}
 	if s.d.Blobs == nil {
 		s.d.Blobs = e.Blobs
 	}
@@ -420,18 +427,18 @@ func (s *Store) SetApproved(id, by string) {
 	s.d.Approvals[id] = by
 }
 
-// Retries implements engine.Ledger.
-func (s *Store) Retries(id, sha string) int {
+// Retries implements engine.Ledger: per update, whatever its head SHA.
+func (s *Store) Retries(id string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.d.Retries[id+"@"+sha]
+	return s.d.Retries[id]
 }
 
 // AddRetry implements engine.Ledger.
-func (s *Store) AddRetry(id, sha string) {
+func (s *Store) AddRetry(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.d.Retries[id+"@"+sha]++
+	s.d.Retries[id]++
 }
 
 // Record implements engine.Ledger: engine actions drive update states.
