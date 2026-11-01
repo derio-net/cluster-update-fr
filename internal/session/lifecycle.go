@@ -141,9 +141,30 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 			// Full verification every tick: a replaced pod, a changed spec or
 			// an ephemeral container added after start (kubectl debug,
 			// sharing the credential volume) ends the session.
-			if why := l.verifyOwned(ctx, r, pod); why != "" {
+			why, unknown := l.verifyOwned(ctx, r, pod)
+			switch {
+			case unknown:
+				// Could not tell this tick: skip it, never kill on a transient
+				// error. Bounded: after verifyUnknownLimit in a row, alarm (and
+				// still do not kill) — c1d-r2.
+				n := 0
+				_ = l.update(func(m map[string]Record) error {
+					x := m[r.ID]
+					x.VerifyUnknown++
+					n = x.VerifyUnknown
+					m[r.ID] = x
+					return nil
+				})
+				if n >= verifyUnknownLimit {
+					l.alarm(alarmKey(r.ID, "verify-unknown", r.PodUID, "unknown"), fmt.Sprintf("session %s: its pod could not be verified for %d cycles in a row (%s)", r.ID, n, why))
+				}
+				continue
+			case why != "":
 				ended = append(ended, l.endAlarm(ctx, r, "verify", "ended: the session pod failed verification: "+why))
 				continue
+			case r.VerifyUnknown > 0:
+				_ = l.update(func(m map[string]Record) error { x := m[r.ID]; x.VerifyUnknown = 0; m[r.ID] = x; return nil })
+				l.resolveAlarm(alarmKey(r.ID, "verify-unknown", r.PodUID, "unknown"))
 			}
 		}
 		switch {
@@ -175,6 +196,10 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 	}
 	return ended
 }
+
+// verifyUnknownLimit: consecutive cycles a pod may be unverifiable before
+// it alarms (it is never killed for it).
+const verifyUnknownLimit = 5
 
 // Orphan is a leftover ReconcileOrphans removed.
 type Orphan struct{ Kind, Name, Reason string }

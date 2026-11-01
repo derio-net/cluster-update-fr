@@ -353,6 +353,43 @@ func TestOrphansNotReapedWhenRecordsAreUnreadable(t *testing.T) {
 	}
 }
 
+type flakySecrets struct{ *fakeKube }
+
+func (f flakySecrets) Get(ctx context.Context, path string, out any) error {
+	if strings.Contains(path, "/secrets/") {
+		return &kube.APIError{Code: 503, Reason: "ServiceUnavailable"}
+	}
+	return f.fakeKube.Get(ctx, path, out)
+}
+
+// c1d-r2: a transient Secret read error is "unknown", not a mismatch: the
+// session is not killed and no false alarm fires — until it persists for
+// verifyUnknownLimit cycles, which alarms (still no kill).
+func TestTransientVerifyErrorsDoNotKill(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	start(t, l, "pr-1", TypeChartMajor)
+	l.Kube = flakySecrets{k}
+	for i := 1; i < verifyUnknownLimit; i++ {
+		if ended := l.Tick(context.Background()); len(ended) != 0 {
+			t.Fatalf("killed on a transient error: %+v", ended)
+		}
+		if a := l.Alarms(); len(a) != 0 {
+			t.Fatalf("false alarm after %d unknown cycles: %v", i, a)
+		}
+	}
+	if ended := l.Tick(context.Background()); len(ended) != 0 {
+		t.Fatal("killed at the unknown limit")
+	}
+	if a := l.Alarms(); len(a) != 1 || !strings.Contains(a[0], "could not be verified") {
+		t.Fatalf("alarm at the limit = %v", a)
+	}
+	if _, ok := k.objects["pods/"+PodName("pr-1")]; !ok {
+		t.Fatal("pod deleted")
+	}
+}
+
 type stuckDelete struct{ *fakeKube }
 
 func (s stuckDelete) Delete(_ context.Context, _, res, _ string) error {

@@ -88,6 +88,8 @@ type Record struct {
 	Image      string            `json:"image,omitempty"`
 	PodUID     string            `json:"pod_uid,omitempty"`
 	SecretUIDs map[string]string `json:"secret_uids,omitempty"`
+	// VerifyUnknown counts consecutive cycles the pod could not be verified.
+	VerifyUnknown int `json:"verify_unknown,omitempty"`
 }
 
 // Ended reports a session the lifecycle ended. Alarm marks a forced end (hard
@@ -251,7 +253,11 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 		rec, ok := l.Get(req.UpgradeID)
 		why := "no write-ahead record with a pod UID for this upgrade id"
 		if ok && rec.TokenHash != "" && rec.PodUID != "" {
-			why = l.verifyOwned(ctx, rec, existing)
+			var unknown bool
+			if why, unknown = l.verifyOwned(ctx, rec, existing); unknown {
+				// Could not tell (API trouble): neither attach nor destroy.
+				return Record{}, false, fmt.Errorf("session: cannot verify pod %s right now (%s); try again", pod, why)
+			}
 		}
 		if why == "" {
 			l.Touch(req.UpgradeID)
@@ -458,25 +464,27 @@ type livePod struct {
 }
 
 // verifyOwned returns "" when live is exactly the pod this console created
-// for rec, else the first mismatch.
-func (l *Launcher) verifyOwned(ctx context.Context, rec Record, live livePod) string {
+// for rec, else the first mismatch. unknown is true when it could not tell
+// (a transient API error): only NotFound or a different UID is a mismatch
+// (c1d-r2).
+func (l *Launcher) verifyOwned(ctx context.Context, rec Record, live livePod) (string, bool) {
 	m := live.Metadata
 	switch {
 	case m.UID != rec.PodUID:
-		return fmt.Sprintf("pod UID %q is not the recorded %q (the pod was replaced)", m.UID, rec.PodUID)
+		return fmt.Sprintf("pod UID %q is not the recorded %q (the pod was replaced)", m.UID, rec.PodUID), false
 	case m.Labels[kube.ManagedByLabel] != kube.ManagedBy || m.Labels[LabelRunID] != rec.ID || m.Labels[LabelType] != rec.Type:
-		return "pod labels are not this session's"
+		return "pod labels are not this session's", false
 	case len(live.Spec.EphemeralContainers) != 0:
-		return "an ephemeral container was added to the pod (it would share the credential volume)"
+		return "an ephemeral container was added to the pod (it would share the credential volume)", false
 	case len(live.Spec.Containers) != 1 || len(live.Spec.InitContainers) != 0 || live.Spec.Containers[0].Image != rec.Image:
-		return "pod containers/image differ from what the console created"
+		return "pod containers/image differ from what the console created", false
 	}
 	wantSA := ""
 	if typeSA[rec.Type] {
 		wantSA = "upgrade-session-" + rec.Type
 	}
 	if sa := live.Spec.ServiceAccountName; sa != wantSA && !(wantSA == "" && sa == "default") {
-		return fmt.Sprintf("pod ServiceAccount %q is not %q", sa, wantSA)
+		return fmt.Sprintf("pod ServiceAccount %q is not %q", sa, wantSA), false
 	}
 	wantVol := map[string]string{"credentials": SecretName(rec.ID), "brief": BriefName(rec.ID)}
 	seen := 0
@@ -485,28 +493,33 @@ func (l *Launcher) verifyOwned(ctx context.Context, rec Record, live livePod) st
 			continue
 		}
 		if wantVol[v.Name] != v.Secret.SecretName {
-			return fmt.Sprintf("pod mounts Secret %q as volume %q", v.Secret.SecretName, v.Name)
+			return fmt.Sprintf("pod mounts Secret %q as volume %q", v.Secret.SecretName, v.Name), false
 		}
 		seen++
 	}
 	if seen != len(wantVol) {
-		return "pod does not mount exactly the session's two Secrets"
+		return "pod does not mount exactly the session's two Secrets", false
 	}
 	for name, uid := range rec.SecretUIDs {
 		var s struct {
 			Metadata kube.Meta `json:"metadata"`
 		}
-		if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "secrets", name), &s); err != nil {
-			return "Secret " + name + " unreadable: " + scrub.String(err.Error())
+		err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "secrets", name), &s)
+		switch {
+		case kube.IsNotFound(err):
+			return "Secret " + name + " is gone", false
+		case err != nil:
+			// A transient read error proves nothing: unknown, not a mismatch.
+			return "Secret " + name + " unreadable: " + scrub.String(err.Error()), true
 		}
 		if s.Metadata.UID != uid {
-			return fmt.Sprintf("Secret %s UID %q is not the recorded %q (it was replaced)", name, s.Metadata.UID, uid)
+			return fmt.Sprintf("Secret %s UID %q is not the recorded %q (it was replaced)", name, s.Metadata.UID, uid), false
 		}
 	}
 	if len(rec.SecretUIDs) != len(wantVol) {
-		return "the record does not hold both Secret UIDs"
+		return "the record does not hold both Secret UIDs", false
 	}
-	return ""
+	return "", false
 }
 
 // refuseUnknown handles a pod under a session's name that the console cannot
