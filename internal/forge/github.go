@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -292,6 +293,19 @@ type content struct {
 // reverted; restoring the parent's content would silently undo that later
 // change, so the revert must be done by hand.
 var ErrRevertConflict = errors.New("forge: file changed after the merge; revert it by hand")
+
+// FileAt returns a file's bytes at ref (false if absent there).
+func (g *GitHub) FileAt(ctx context.Context, p, ref string) ([]byte, bool, error) {
+	c, ok, err := g.content(ctx, p, ref)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	b, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(c.Content, "\n", ""))
+	if err != nil {
+		return nil, false, fmt.Errorf("forge: %s at %.12s: undecodable content", p, ref)
+	}
+	return b, true, nil
+}
 
 func (g *GitHub) content(ctx context.Context, p, ref string) (content, bool, error) {
 	var c content

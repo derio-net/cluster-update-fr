@@ -337,9 +337,32 @@ func TestRevertScopeSensitiveOnlyForSessionPRs(t *testing.T) {
 	}
 }
 
+func TestReviewApplicationIsStructural(t *testing.T) {
+	base := []byte("kind: Application\nmetadata: {name: a}\nspec:\n  project: default\n  source:\n    repoURL: https://x\n    targetRevision: 1.0.0\n")
+	listItem := []byte("kind: Application\nmetadata: {name: a}\nspec:\n  project: default\n  source:\n    \"repoURL\": https://evil\n    targetRevision: 1.0.0\n")
+	notes, ok := ReviewApplication(base, listItem, true, true)
+	if !ok || len(notes) != 1 || !strings.Contains(notes[0], "spec.source") || !strings.Contains(notes[0], "evil") {
+		t.Fatalf("quoted key change: %v %v", notes, ok)
+	}
+	if notes, ok := ReviewApplication(base, base, true, true); !ok || len(notes) != 0 {
+		t.Fatalf("no change: %v", notes)
+	}
+	if _, ok := ReviewApplication([]byte("spec: {{ .Values.x }}\n: :"), base, true, true); ok {
+		t.Fatal("a templated (unparseable) file must not be reviewed as parsed")
+	}
+	set := []byte("kind: ApplicationSet\nmetadata: {name: s}\nspec:\n  template:\n    spec:\n      destination: {server: https://a}\n")
+	set2 := []byte("kind: ApplicationSet\nmetadata: {name: s}\nspec:\n  template:\n    spec:\n      destination: {server: https://b}\n")
+	if notes, _ := ReviewApplication(set, set2, true, true); len(notes) != 1 || !strings.Contains(notes[0], "spec.destination") {
+		t.Fatalf("ApplicationSet destination: %v", notes)
+	}
+}
+
 func TestReviewNotesFlagSourceChanges(t *testing.T) {
+	if n := ReviewNotes("-  - repoURL: https://a\n+  - repoURL: https://b\n+  \"sources\":"); strings.Join(n, ",") != "changes repoURL,changes sources" {
+		t.Fatalf("list-item / quoted keys: %v", n)
+	}
 	n := ReviewNotes("-    repoURL: https://a\n+    repoURL: https://b\n-    targetRevision: 1\n+    targetRevision: 2\n+  destination:")
-	if strings.Join(n, ",") != "changes repoURL,changes destination" {
+	if strings.Join(n, ",") != "changes repoURL,changes targetRevision,changes destination" {
 		t.Fatalf("notes = %v", n)
 	}
 	if !IsSensitive("apps/root/templates/x.yaml") || IsSensitive("versions/frank.yaml") {

@@ -55,6 +55,7 @@ type fakeGitHub struct {
 	restored map[string][]string
 	branches []string // console branches on GitHub
 	patches  map[int]map[string]forge.FilePatch
+	fileAt   map[string][]byte // "ref:path" → content
 	deleted  []string
 	// openErr fails OpenPRs; openHeads are branches GitHub reports an open
 	// PR for when asked per head; headErr fails that per-head ask.
@@ -110,6 +111,13 @@ func (g *fakeGitHub) LastPush(_ context.Context, branch string) (forge.Push, err
 		}
 	}
 	return forge.Push{}, forge.ErrNotFound
+}
+
+func (g *fakeGitHub) FileAt(_ context.Context, path, ref string) ([]byte, bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	b, ok := g.fileAt[ref+":"+path]
+	return b, ok, nil
 }
 
 // Compare answers for the PR whose head is head: its files (patches with
@@ -1212,6 +1220,34 @@ func TestHeadMovingBetweenVerifyAndMergeAborts(t *testing.T) {
 	}
 	if !refused {
 		t.Errorf("history = %+v", a.Store.History("pr-7"))
+	}
+}
+
+// c1d-r5 follow-up: a renamed root template is judged (and shown) by both
+// paths; an omitted patch is flagged and sensitive; an Application's
+// source change is found structurally, with old → new.
+func TestReviewFileRenamesPatchesAndApplications(t *testing.T) {
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	rf := a.reviewFile(context.Background(), forge.ChangedFile{Name: "docs/x.yaml", Previous: "apps/root/templates/cilium.yaml",
+		FilePatch: forge.FilePatch{Status: "renamed", Patch: "@@\n"}}, "main", "h1")
+	if !rf.Sensitive || rf.Previous != "apps/root/templates/cilium.yaml" {
+		t.Errorf("rename out of a sensitive path: %+v", rf)
+	}
+	rf = a.reviewFile(context.Background(), forge.ChangedFile{Name: "apps/homepage/big.yaml", FilePatch: forge.FilePatch{Status: "modified"}}, "main", "h1")
+	if !rf.Sensitive || !strings.Contains(strings.Join(rf.Notes, ","), "review on GitHub") {
+		t.Errorf("empty patch: %+v", rf)
+	}
+	app := func(repo string) []byte {
+		return []byte("apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata: {name: cilium}\nspec:\n  sources:\n  - repoURL: https://helm.cilium.io\n    chart: cilium\n  - repoURL: " + repo + "\n    ref: values\n  destination: {namespace: kube-system}\n")
+	}
+	gh.fileAt = map[string][]byte{
+		"main:apps/root/templates/cilium.yaml": app("https://github.com/derio-net/frank"),
+		"h1:apps/root/templates/cilium.yaml":   app("https://github.com/evil/frank"),
+	}
+	rf = a.reviewFile(context.Background(), forge.ChangedFile{Name: "apps/root/templates/cilium.yaml", FilePatch: forge.FilePatch{Status: "modified", Patch: "@@\n-x\n+y"}}, "main", "h1")
+	if !rf.Sensitive || !strings.Contains(strings.Join(rf.Notes, ","), "spec.sources") || !strings.Contains(strings.Join(rf.Notes, ","), "evil") {
+		t.Errorf("sources[1] change: %+v", rf)
 	}
 }
 

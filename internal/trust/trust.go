@@ -30,14 +30,21 @@
 package trust
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/derio-net/cluster-update-fr/internal/engine"
 	"github.com/derio-net/cluster-update-fr/internal/forge"
@@ -212,10 +219,109 @@ func exactly(path string, files []string) bool {
 // IsSensitive reports a path that only the session path may touch.
 func IsSensitive(path string) bool { return within(path, sensitive) }
 
-var reviewLine = regexp.MustCompile(`^[+-][ \t]*(repoURL|destination|server|namespace|project|chart|path|syncPolicy|automated|prune|ignoreDifferences):`)
+// reviewLine is the textual FALLBACK for non-Application files: the key may
+// sit behind a list marker and/or in quotes.
+var reviewLine = regexp.MustCompile(`^[+-][ \t]*(?:-[ \t]*)?["']?(repoURL|destination|server|namespace|project|chart|path|sources?|targetRevision|helm|values|valueFiles|syncPolicy|automated|prune|ignoreDifferences)["']?[ \t]*:`)
+
+// IsApplicationPath: files whose Application objects get the structural
+// review (the root app-of-apps templates, both clusters).
+func IsApplicationPath(p string) bool {
+	return strings.Contains("/"+p, "/apps/root/templates/")
+}
+
+// reviewedSubtrees are the parts of an Application that decide WHAT is
+// deployed WHERE and HOW it syncs.
+var reviewedSubtrees = []string{"source", "sources", "destination", "project", "syncPolicy"}
+
+// ReviewApplication diffs the Application/ApplicationSet documents of a file
+// at base and head STRUCTURALLY (c1d-r5): any change to spec.source,
+// spec.sources, spec.destination, spec.project or spec.syncPolicy (for an
+// ApplicationSet, under spec.template.spec) is a note "old → new". ok is
+// false when either side cannot be parsed as YAML (a Helm-templated file):
+// the caller then shows "review on GitHub" and treats the file as sensitive.
+func ReviewApplication(base, head []byte, hasBase, hasHead bool) (notes []string, ok bool) {
+	docs := func(b []byte) (map[string]map[string]any, bool) {
+		out := map[string]map[string]any{}
+		dec := yaml.NewDecoder(bytes.NewReader(b))
+		for i := 0; ; i++ {
+			var d map[string]any
+			err := dec.Decode(&d)
+			if errors.Is(err, io.EOF) {
+				return out, true
+			}
+			if err != nil {
+				return nil, false
+			}
+			kind, _ := d["kind"].(string)
+			if kind != "Application" && kind != "ApplicationSet" {
+				continue
+			}
+			spec, _ := d["spec"].(map[string]any)
+			if kind == "ApplicationSet" {
+				tmpl, _ := spec["template"].(map[string]any)
+				spec, _ = tmpl["spec"].(map[string]any)
+			}
+			meta, _ := d["metadata"].(map[string]any)
+			name, _ := meta["name"].(string)
+			out[kind+"/"+name+fmt.Sprintf("#%d", i)] = spec
+		}
+	}
+	var bd, hd map[string]map[string]any
+	var okB, okH = true, true
+	if hasBase {
+		bd, okB = docs(base)
+	}
+	if hasHead {
+		hd, okH = docs(head)
+	}
+	if !okB || !okH {
+		return nil, false
+	}
+	show := func(v any) string {
+		b, _ := json.Marshal(v)
+		s := string(b)
+		if len(s) > 160 {
+			s = s[:160] + "…"
+		}
+		return s
+	}
+	keys := map[string]bool{}
+	for k := range bd {
+		keys[k] = true
+	}
+	for k := range hd {
+		keys[k] = true
+	}
+	sorted := make([]string, 0, len(keys))
+	for k := range keys {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+	for _, k := range sorted {
+		b, inB := bd[k]
+		h, inH := hd[k]
+		name := k[:strings.LastIndex(k, "#")]
+		switch {
+		case !inB:
+			notes = append(notes, name+" added")
+			continue
+		case !inH:
+			notes = append(notes, name+" removed")
+			continue
+		}
+		for _, f := range reviewedSubtrees {
+			if !reflect.DeepEqual(b[f], h[f]) {
+				notes = append(notes, fmt.Sprintf("%s spec.%s: %s → %s", name, f, show(b[f]), show(h[f])))
+			}
+		}
+	}
+	return notes, true
+}
 
 // ReviewNotes lists the changed lines of a patch an operator must look at
 // before merging: Application source/destination/sync-policy keys (c1d-r5).
+// For Application files the structural ReviewApplication is authoritative;
+// this textual scan is the fallback for everything else.
 func ReviewNotes(patch string) []string {
 	seen := map[string]bool{}
 	var out []string

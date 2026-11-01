@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/derio-net/cluster-update-fr/internal/engine"
+	"github.com/derio-net/cluster-update-fr/internal/forge"
 	"github.com/derio-net/cluster-update-fr/internal/scrub"
 	"github.com/derio-net/cluster-update-fr/internal/store"
 	"github.com/derio-net/cluster-update-fr/internal/trust"
@@ -45,8 +46,46 @@ type SessionPR struct {
 // ReviewFile is one changed file of a session PR, as shown for review.
 type ReviewFile struct {
 	Name      string   `json:"name"`
+	Previous  string   `json:"previous,omitempty"` // a rename's old path
+	Status    string   `json:"status,omitempty"`   // added | removed | renamed | modified
 	Sensitive bool     `json:"sensitive,omitempty"`
 	Notes     []string `json:"notes,omitempty"`
+}
+
+// reviewFile builds what the operator sees for one changed file: renames
+// show (and are judged by) both paths; an omitted patch or an Application
+// that cannot be parsed is flagged for review on GitHub and treated as
+// sensitive; Application files get the structural source/destination diff.
+func (a *App) reviewFile(ctx context.Context, c forge.ChangedFile, base, head string) ReviewFile {
+	rf := ReviewFile{Name: trust.Title(c.Name), Previous: trust.Title(c.Previous), Status: trust.Title(c.Status),
+		Sensitive: trust.IsSensitive(c.Name) || (c.Previous != "" && trust.IsSensitive(c.Previous))}
+	if c.Patch == "" {
+		rf.Sensitive = true
+		rf.Notes = append(rf.Notes, "patch not shown — review on GitHub")
+	}
+	if trust.IsApplicationPath(c.Name) || trust.IsApplicationPath(c.Previous) {
+		old := c.Name
+		if c.Previous != "" {
+			old = c.Previous
+		}
+		bb, inBase, err1 := a.GitHub.FileAt(ctx, old, base)
+		hb, inHead, err2 := a.GitHub.FileAt(ctx, c.Name, head)
+		notes, ok := trust.ReviewApplication(bb, hb, inBase && c.Status != "added", inHead && c.Status != "removed")
+		if err1 != nil || err2 != nil || !ok {
+			rf.Sensitive = true
+			rf.Notes = append(rf.Notes, "Application not parseable — review on GitHub")
+			return rf
+		}
+		if len(notes) > 0 {
+			rf.Sensitive = true
+		}
+		for _, n := range notes {
+			rf.Notes = append(rf.Notes, scrub.String(n))
+		}
+		return rf
+	}
+	rf.Notes = append(rf.Notes, trust.ReviewNotes(c.Patch)...)
+	return rf
 }
 
 // Key is the request's identity: (session, PR) — never the PR alone, so
@@ -180,7 +219,7 @@ func (a *App) RequestMerge(ctx context.Context, id, token string, pr int) error 
 		URL: fmt.Sprintf("https://github.com/%s/pull/%d", a.Cfg.FrankRepo, pr)}
 	if changed, err := a.GitHub.Compare(ctx, p.BaseRef, p.HeadSHA); err == nil {
 		for _, c := range changed {
-			req.Files = append(req.Files, ReviewFile{Name: trust.Title(c.Name), Sensitive: trust.IsSensitive(c.Name), Notes: trust.ReviewNotes(c.Patch)})
+			req.Files = append(req.Files, a.reviewFile(ctx, c, p.BaseRef, p.HeadSHA))
 		}
 	} else if checkErr == nil {
 		checkErr = fmt.Errorf("its changes cannot be shown for review: %w", err)
