@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"sort"
@@ -565,15 +566,34 @@ const alarmKeysBlob = "session-alarm-keys"
 // same (session, reason, state) never alarms twice, so a cleanup stuck for
 // hours is one message, not one per cycle. Keys persist across restarts and
 // are cleared when a fresh session is created for the id.
+//
+// The de-dup key and the outbox entry are written in ONE atomic store update
+// (c1d-r7): a recorded key always has its queued alarm, and vice versa.
 func (l *Launcher) alarm(key, msg string) {
+	msg = scrub.String(msg)
 	fresh := false
-	_ = store.UpdateJSON(l.Store, alarmKeysBlob, func(m *map[string]bool) error {
-		if *m == nil {
-			*m = map[string]bool{}
+	_ = l.Store.UpdateBlobs([]string{alarmKeysBlob, store.OutboxBlob}, func(m map[string]json.RawMessage) error {
+		keys := map[string]bool{}
+		if raw, ok := m[alarmKeysBlob]; ok {
+			if err := json.Unmarshal(raw, &keys); err != nil {
+				return err
+			}
 		}
-		if !(*m)[key] {
-			(*m)[key], fresh = true, true
+		if keys == nil { // a "null" blob
+			keys = map[string]bool{}
 		}
+		if keys[key] {
+			return nil
+		}
+		keys[key], fresh = true, true
+		ob := store.LoadOutbox(m[store.OutboxBlob])
+		ob.Append(true, "🚨 <b>Upgrade session</b> — "+html.EscapeString(msg))
+		kb, err1 := json.Marshal(keys)
+		obb, err2 := json.Marshal(ob)
+		if err1 != nil || err2 != nil {
+			return errors.New("session: alarm not encodable")
+		}
+		m[alarmKeysBlob], m[store.OutboxBlob] = kb, obb
 		return nil
 	})
 	if !fresh {
@@ -581,7 +601,7 @@ func (l *Launcher) alarm(key, msg string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.alarms = append(l.alarms, scrub.String(msg))
+	l.alarms = append(l.alarms, msg) // shown in the console; already queued for #security
 }
 
 // alarmKey names one incident: (subject, object UID, reason) — never a broad

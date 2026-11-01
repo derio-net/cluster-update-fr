@@ -337,6 +337,32 @@ func TestReconcileOrphans(t *testing.T) {
 	}
 }
 
+// c1d-r7: an alarm's de-dup key and its outbox entry are written together.
+func TestAlarmKeyAndOutboxEntryAreWrittenTogether(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := launcher(t, newFake(), &now)
+	l.alarm("k1", "session x: <bad> & alarming")
+	l.alarm("k1", "again")
+	ob := store.LoadOutbox(mustRaw(t, l.Store, store.OutboxBlob))
+	if len(ob.Msgs) != 1 || !strings.Contains(ob.Msgs[0].Text, "&lt;bad&gt; &amp; alarming") || !ob.Msgs[0].Security {
+		t.Fatalf("outbox = %+v", ob.Msgs)
+	}
+	keys := map[string]bool{}
+	_ = json.Unmarshal(mustRaw(t, l.Store, alarmKeysBlob), &keys)
+	if !keys["k1"] {
+		t.Fatal("de-dup key missing")
+	}
+}
+
+func mustRaw(t *testing.T, s *store.Store, key string) json.RawMessage {
+	t.Helper()
+	raw, ok := s.RawBlob(key)
+	if !ok {
+		t.Fatalf("blob %s missing", key)
+	}
+	return raw
+}
+
 // c1d-r8: a write never replaces undecodable session records with {}.
 func TestUpdateNeverOverwritesUnreadableRecords(t *testing.T) {
 	now := time.Unix(0, 0)

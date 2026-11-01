@@ -142,7 +142,6 @@ type View struct {
 
 const (
 	blobAlarms = "alarms"
-	blobOutbox = "alarm-outbox"
 	blobReport = "report"
 )
 
@@ -854,13 +853,12 @@ func (a *App) sessionAlarms(ctx context.Context) []string {
 	if a.Launcher == nil {
 		return nil
 	}
+	// The launcher queued each alarm in the outbox together with its de-dup
+	// key (c1d-r7); here they are only logged, shown and flushed.
 	msgs := a.Launcher.Alarms()
-	var texts []string
 	for _, m := range msgs {
 		a.logf("security alarm: %s", m)
-		texts = append(texts, "🚨 <b>Upgrade session</b> — "+escape(m))
 	}
-	a.enqueue(true, texts...)
 	a.flushOutbox(ctx)
 	return msgs
 }

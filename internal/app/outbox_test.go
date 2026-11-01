@@ -47,17 +47,17 @@ func TestOutboxConcurrentWritersLoseNothing(t *testing.T) {
 // At the cap a non-security message goes first; security alarms are never
 // dropped, only folded into one "N pending" message.
 func TestOutboxCapNeverDropsSecurityAlarms(t *testing.T) {
-	st := &outboxState{}
+	st := &store.OutboxState{}
 	add := func(sec bool, n int) {
 		for i := 0; i < n; i++ {
 			st.Next++
-			st.Msgs = append(st.Msgs, outboxMsg{ID: st.Next, Text: fmt.Sprint(st.Next), Security: sec})
+			st.Msgs = append(st.Msgs, store.OutboxMsg{ID: st.Next, Text: fmt.Sprint(st.Next), Security: sec})
 		}
 	}
 	add(false, 10)
 	add(true, 45)
-	enforceCap(st)
-	if len(st.Msgs) != outboxCap {
+	st.EnforceCap()
+	if len(st.Msgs) != store.OutboxCap {
 		t.Fatalf("len = %d", len(st.Msgs))
 	}
 	sec := 0
@@ -70,7 +70,7 @@ func TestOutboxCapNeverDropsSecurityAlarms(t *testing.T) {
 		t.Fatalf("security alarms kept: %d, want all 45", sec)
 	}
 	add(true, 30)
-	enforceCap(st)
+	st.EnforceCap()
 	total := 0
 	for _, m := range st.Msgs {
 		if !m.Security {
@@ -85,8 +85,8 @@ func TestOutboxCapNeverDropsSecurityAlarms(t *testing.T) {
 			total++
 		}
 	}
-	if len(st.Msgs) != outboxCap || total != 75 {
-		t.Fatalf("len %d, alarms accounted for %d, want %d / 75", len(st.Msgs), total, outboxCap)
+	if len(st.Msgs) != store.OutboxCap || total != 75 {
+		t.Fatalf("len %d, alarms accounted for %d, want %d / 75", len(st.Msgs), total, store.OutboxCap)
 	}
 }
 
