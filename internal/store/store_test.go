@@ -174,6 +174,9 @@ func TestLedgerDrivesUpdates(t *testing.T) {
 	if s.Retries("pr-2") != 1 || s.Retries("pr-3") != 0 {
 		t.Error("retries are per update")
 	}
+	if !s.RetriedAt("pr-2").Equal(t0) || !s.RetriedAt("pr-3").IsZero() {
+		t.Error("the retry time is recorded once")
+	}
 }
 
 func TestReconcileNamesEveryLeftover(t *testing.T) {

@@ -354,7 +354,13 @@ func (a *App) Cycle(ctx context.Context) View {
 			}
 			statuses[p.HeadSHA] = st
 		}
-		return cidiag.Evaluate(st, p.UpdatedAt, now, a.Cfg.CITimeout, a.ciRequirement(decl.Policy))
+		req := a.ciRequirement(decl.Policy)
+		id := engine.ItemID(p.Number)
+		if strings.HasPrefix(p.HeadRef, engine.BatchBranchPrefix) {
+			id = engine.BatchID(p.Number)
+		}
+		req.Since = a.Store.RetriedAt(id) // after a retry, only newer results count
+		return cidiag.Evaluate(st, p.UpdatedAt, now, a.Cfg.CITimeout, req)
 	}
 	trustCache := map[string]error{}
 	items, untrusted := a.trusted(ctx, e.Build(prs, verdict), trustCache)

@@ -79,6 +79,29 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
+// c1c-r11: after a retry, only results NEWER than the retry count: the old
+// failure the retry acted on must not fail the update a second time.
+func TestEvaluateAfterARetryNeedsANewerResult(t *testing.T) {
+	timeout := 30 * time.Minute
+	old := st("gitea-actions/ci / go", "failure", t0)
+	retried := t0.Add(time.Minute)
+	req := Requirement{Creators: []string{bridge}, Since: retried}
+	if v, d := Evaluate([]forge.Status{old}, t0, retried.Add(time.Minute), timeout, req); v != Pending {
+		t.Errorf("only the pre-retry failure: %s (%s), want pending", v, d)
+	}
+	if v, _ := Evaluate([]forge.Status{old}, t0, retried.Add(timeout+time.Minute), timeout, req); v != Missing {
+		t.Errorf("no new result within the timeout after the retry: %s", v)
+	}
+	again := st("gitea-actions/ci / go", "failure", retried.Add(5*time.Minute))
+	if v, _ := Evaluate([]forge.Status{old, again}, t0, retried.Add(10*time.Minute), timeout, req); v != Failed {
+		t.Errorf("a newer failure: %s, want failed", v)
+	}
+	green := st("gitea-actions/ci / go", "success", retried.Add(5*time.Minute))
+	if v, _ := Evaluate([]forge.Status{old, green}, t0, retried.Add(10*time.Minute), timeout, req); v != Passed {
+		t.Errorf("a newer pass: %s", v)
+	}
+}
+
 // fakeForges records every action so tests can assert what was (and was
 // never) attempted.
 type fakeForges struct {

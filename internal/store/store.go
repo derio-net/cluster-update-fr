@@ -121,6 +121,7 @@ type data struct {
 	Holds     map[string]string          `json:"holds"`
 	Approvals map[string]string          `json:"approvals"`
 	Retries   map[string]int             `json:"retries"`
+	RetriedAt map[string]time.Time       `json:"retried_at,omitempty"`
 	Blobs     map[string]json.RawMessage `json:"blobs"`
 }
 
@@ -434,11 +435,25 @@ func (s *Store) Retries(id string) int {
 	return s.d.Retries[id]
 }
 
-// AddRetry implements engine.Ledger.
+// AddRetry implements engine.Ledger. The first one records WHEN the retry
+// happened: only CI results newer than that count afterwards (c1c-r11).
 func (s *Store) AddRetry(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.d.Retries[id] == 0 {
+		if s.d.RetriedAt == nil {
+			s.d.RetriedAt = map[string]time.Time{}
+		}
+		s.d.RetriedAt[id] = s.now()
+	}
 	s.d.Retries[id]++
+}
+
+// RetriedAt is when the update's one CI retry was made (zero if none).
+func (s *Store) RetriedAt(id string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.d.RetriedAt[id]
 }
 
 // Record implements engine.Ledger: engine actions drive update states.

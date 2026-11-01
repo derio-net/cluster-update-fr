@@ -56,6 +56,10 @@ var DefaultRequired = []string{BridgePrefix + "*"}
 type Requirement struct {
 	Contexts []string
 	Creators []string
+	// Since, when set (the time of the update's one CI retry), discards
+	// every status created at or before it and measures the timeout from it
+	// (c1c-r11): the failure a retry acted on cannot fail the update again.
+	Since time.Time
 }
 
 var notReallySuccess = regexp.MustCompile(`(?i)\b(skipped|warning)\b`)
@@ -69,6 +73,9 @@ func (r Requirement) matches(pattern, ctx string) bool {
 
 // Evaluate reads the GitHub statuses of a PR head pushed at headAt.
 func Evaluate(statuses []forge.Status, headAt, now time.Time, timeout time.Duration, req Requirement) (Verdict, string) {
+	if req.Since.After(headAt) {
+		headAt = req.Since
+	}
 	late := now.Sub(headAt) > timeout
 	wait := func(detail string) (Verdict, string) {
 		if late {
@@ -85,7 +92,7 @@ func Evaluate(statuses []forge.Status, headAt, now time.Time, timeout time.Durat
 	}
 	var trusted []forge.Status
 	for _, s := range statuses {
-		if creators[s.Creator.Login] {
+		if creators[s.Creator.Login] && (req.Since.IsZero() || s.CreatedAt.After(req.Since)) {
 			trusted = append(trusted, s)
 		}
 	}
@@ -130,7 +137,9 @@ func Evaluate(statuses []forge.Status, headAt, now time.Time, timeout time.Durat
 		}
 		return Pending, "CI running"
 	}
-	if s, ok := latest["renovate/stability-days"]; ok && s.State == "pending" {
+	// Renovate's own release-age gate only ever DELAYS a merge, so it is
+	// read from every status, whoever posted it.
+	if s, ok := forge.Latest(statuses)["renovate/stability-days"]; ok && s.State == "pending" {
 		return Waiting, "waiting for Renovate's minimum release age"
 	}
 	return Passed, "CI passed"
