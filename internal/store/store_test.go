@@ -148,6 +148,21 @@ func TestPersistenceAndCorruptFile(t *testing.T) {
 	}
 }
 
+// sec2-6: a merge is never recorded onto a terminal update.
+func TestMarkMergedRefusesTerminalUpdates(t *testing.T) {
+	for _, st := range []State{Verified, RolledBack, Abandoned} {
+		s, _ := open(t)
+		s.Track(Update{ID: "u", Title: "x"})
+		s.d.Updates["u"].State, s.d.Updates["u"].MergeSHA = st, "orig"
+		if err := s.MarkMerged("u", "new", 9, "derio", "late merge"); !errors.Is(err, ErrIllegal) {
+			t.Errorf("%s: %v", st, err)
+		}
+		if u, _ := s.Get("u"); u.MergeSHA != "orig" || u.State != st {
+			t.Errorf("%s record rewritten: %+v", st, u)
+		}
+	}
+}
+
 // c1c-r3: a merged batch ships its members — each becomes merged with the
 // batch's merge commit, "shipped in batch #N", not "abandoned" when Renovate
 // later closes its PR — whether the console merged it or the reconciler

@@ -317,9 +317,12 @@ func (s *Store) MarkMerged(id, sha string, pr int, by, reason string) error {
 		// a later PR of the same session: verification restarts from it
 		return s.transitionAs(id, Merged, by, reason, set, true)
 	}
-	set(u)
-	s.appendEvent(Event{At: s.now(), Update: id, Action: "merged", By: by, PR: pr, SHA: sha, Reason: reason})
-	return nil
+	// Terminal (verified, rolled back, abandoned): never rewrite its merge
+	// commit under a state that claims it is settled (sec2-6). The caller
+	// refuses before merging; this is the second layer.
+	s.appendEvent(Event{At: s.now(), Update: id, Action: "merge-recorded-elsewhere", By: by, PR: pr, SHA: sha,
+		Reason: fmt.Sprintf("PR #%d merged while the update was %s; its record was left unchanged", pr, u.State)})
+	return fmt.Errorf("%w: %s is %s; a merge cannot be recorded on it", ErrIllegal, id, u.State)
 }
 
 // MarkRevertMerged records that the update's revert PR merged at sha; the
