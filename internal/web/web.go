@@ -414,7 +414,7 @@ func apiError(w http.ResponseWriter, err error) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, session.ErrNoSession):
 		http.Error(w, "no such session", http.StatusNotFound)
-	case errors.Is(err, session.ErrTranscriptTooLarge):
+	case errors.Is(err, session.ErrTranscriptTooLarge), errors.Is(err, session.ErrFieldTooLarge):
 		http.Error(w, scrub.String(err.Error()), http.StatusRequestEntityTooLarge)
 	default:
 		http.Error(w, scrub.String(err.Error()), http.StatusInternalServerError)

@@ -262,6 +262,41 @@ func TestTranscriptCapAndScrubTimeout(t *testing.T) {
 	}
 }
 
+// Every session-supplied field is capped and redacted under the time bound:
+// the outcome cannot bypass the transcript's limits, nor can a step name.
+func TestEverySessionFieldIsCappedAndBoundedScrubbed(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	start(t, l, "pr-9", TypeChartMajor)
+	tok := l.StepToken("pr-9")
+	if err := l.StepStarted("pr-9", tok, strings.Repeat("n", MaxStepName+1)); !errors.Is(err, ErrFieldTooLarge) {
+		t.Errorf("oversize step name: %v", err)
+	}
+	if err := l.End(context.Background(), "pr-9", strings.Repeat("o", DefaultOutcomeMax+1), "session", ""); !errors.Is(err, ErrFieldTooLarge) {
+		t.Errorf("oversize outcome: %v", err)
+	}
+	if _, ok := l.Get("pr-9"); !ok {
+		t.Fatal("a refused outcome must not end the session")
+	}
+	l.ScrubTimeout = time.Nanosecond
+	l.scrubFn = func(_ *scrub.Set, s string) string { time.Sleep(50 * time.Millisecond); return s }
+	if err := l.StepStarted("pr-9", tok, "leaky step name"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := l.Get("pr-9"); strings.Contains(r.StepName, "leaky") {
+		t.Errorf("step name stored unredacted after a scrub timeout: %q", r.StepName)
+	}
+	if err := l.End(context.Background(), "pr-9", "leaky outcome", "session", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range l.Store.History("pr-9") {
+		if strings.Contains(e.Reason, "leaky") {
+			t.Errorf("History holds unredacted session text after a scrub timeout: %q", e.Reason)
+		}
+	}
+}
+
 type stuckDelete struct{ *fakeKube }
 
 func (s stuckDelete) Delete(_ context.Context, _, res, _ string) error {

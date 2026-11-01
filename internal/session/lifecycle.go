@@ -35,6 +35,12 @@ func (l *Launcher) step(id, token string, running bool, name string) error {
 	if !l.checkToken(rec, token) {
 		return ErrBadToken
 	}
+	// Session-supplied: capped, then redacted under the time bound before it
+	// is stored or rendered.
+	if len(name) > MaxStepName {
+		return fmt.Errorf("%w: step name is %d bytes, limit %d", ErrFieldTooLarge, len(name), MaxStepName)
+	}
+	name = l.boundedScrub(l.Scrubber(id), name, "step name")
 	now := l.now()
 	err := l.update(func(m map[string]Record) error {
 		r := m[id]
@@ -215,8 +221,12 @@ func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) 
 	if len(transcript) > l.transcriptMax() {
 		return fmt.Errorf("%w: %d bytes, limit %d", ErrTranscriptTooLarge, len(transcript), l.transcriptMax())
 	}
+	if len(outcome) > l.outcomeMax() {
+		return fmt.Errorf("%w: outcome is %d bytes, limit %d", ErrFieldTooLarge, len(outcome), l.outcomeMax())
+	}
 	rec, ok := l.Get(id)
 	set := l.Scrubber(id)
+	outcome = l.boundedScrub(set, outcome, "outcome")
 	cerr := l.cleanup(ctx, PodName(id))
 	if cerr != nil && !errors.Is(cerr, kube.ErrForbiddenWrite) {
 		return cerr // API trouble: keep the record, retry next tick
@@ -230,7 +240,7 @@ func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) 
 		clean := l.scrubTranscript(set, transcript)
 		_ = l.Store.Edit(id, func(u *store.Update) { u.Transcript = clean })
 	}
-	l.Store.AddEvent(store.Event{At: l.now(), Update: id, Action: "session-ended", By: by, Reason: set.String(outcome)})
+	l.Store.AddEvent(store.Event{At: l.now(), Update: id, Action: "session-ended", By: by, Reason: outcome})
 	l.mu.Lock()
 	delete(l.sets, id)
 	delete(l.tokens, id)
@@ -252,9 +262,34 @@ func (l *Launcher) transcriptMax() int {
 // TranscriptLimit is the cap the session API enforces on request bodies.
 func (l *Launcher) TranscriptLimit() int { return l.transcriptMax() }
 
-// scrubTranscript redacts under a time limit. A transcript whose redaction
-// does not finish in time is WITHHELD, never stored unredacted.
+// Session API field caps (every session-supplied field is capped and goes
+// through the bounded scrubber before it is stored or rendered).
+const (
+	MaxStepName       = 256  // bytes
+	DefaultOutcomeMax = 4096 // bytes
+)
+
+// ErrFieldTooLarge: a session-supplied field exceeds its cap.
+var ErrFieldTooLarge = errors.New("session: field too large")
+
+func (l *Launcher) outcomeMax() int {
+	if l.OutcomeMax <= 0 {
+		return DefaultOutcomeMax
+	}
+	return l.OutcomeMax
+}
+
+// scrubTranscript redacts a transcript under the time bound.
 func (l *Launcher) scrubTranscript(set *scrub.Set, text string) string {
+	return l.boundedScrub(set, text, "transcript")
+}
+
+// boundedScrub redacts session-supplied text under a time limit. Text whose
+// redaction does not finish in time is WITHHELD, never stored unredacted.
+func (l *Launcher) boundedScrub(set *scrub.Set, text, what string) string {
+	if text == "" {
+		return ""
+	}
 	fn := l.scrubFn
 	if fn == nil {
 		fn = scrub.Transcript
@@ -269,7 +304,7 @@ func (l *Launcher) scrubTranscript(set *scrub.Set, text string) string {
 	case s := <-done:
 		return s
 	case <-time.After(timeout):
-		return fmt.Sprintf("[transcript withheld: redaction of %d bytes did not finish within %s]", len(text), timeout)
+		return fmt.Sprintf("[%s withheld: redaction of %d bytes did not finish within %s]", what, len(text), timeout)
 	}
 }
 

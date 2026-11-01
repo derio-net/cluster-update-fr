@@ -115,6 +115,7 @@ type Launcher struct {
 	// TranscriptMax caps a finished session's transcript (bytes, 0 = 1 MiB);
 	// ScrubTimeout bounds its redaction (0 = 10s) — c1s-r11.
 	TranscriptMax int
+	OutcomeMax    int // finish outcome cap (bytes, 0 = 4 KiB)
 	ScrubTimeout  time.Duration
 	scrubFn       func(*scrub.Set, string) string // tests
 

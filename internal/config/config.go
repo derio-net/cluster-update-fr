@@ -90,6 +90,7 @@ type Config struct {
 	// TranscriptMax caps a session transcript (bytes, default 1 MiB);
 	// TranscriptScrubTimeout bounds its redaction (default 10s).
 	TranscriptMax          int
+	OutcomeMax             int // a session's finish outcome (bytes, default 4 KiB)
 	TranscriptScrubTimeout time.Duration
 	ReportHour             int // UTC hour of the daily report
 
@@ -205,6 +206,14 @@ func Load(getenv func(string) string) (*Config, error) {
 			return nil, fmt.Errorf("config: SESSION_TRANSCRIPT_MAX=%q must be bytes between 1024 and 67108864", v)
 		}
 		c.TranscriptMax = n
+	}
+	c.OutcomeMax = 4096
+	if v := strings.TrimSpace(getenv("SESSION_OUTCOME_MAX")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 64 || n > 64<<10 {
+			return nil, fmt.Errorf("config: SESSION_OUTCOME_MAX=%q must be bytes between 64 and 65536", v)
+		}
+		c.OutcomeMax = n
 	}
 	c.MaxStepStarts = 50
 	if v := strings.TrimSpace(getenv("SESSION_MAX_STEP_STARTS")); v != "" {
