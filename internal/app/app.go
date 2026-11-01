@@ -913,9 +913,14 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, prsOK bool, frank *
 			}
 		}
 		// A revert PR merged outside the console still has to be verified.
-		if u.RevertPR > 0 && u.RevertSHA == "" && !open[u.RevertPR] {
-			if p, err := a.GitHub.PR(ctx, u.RevertPR); err == nil && p.Merged {
-				_ = a.Store.MarkRevertMerged(u.ID, p.MergeCommitSHA, "reconciler")
+		if prsOK && u.RevertPR > 0 && u.RevertSHA == "" && !open[u.RevertPR] {
+			if p, err := a.GitHub.PR(ctx, u.RevertPR); err == nil && p.Number == u.RevertPR {
+				switch {
+				case p.Merged:
+					_ = a.Store.MarkRevertMerged(u.ID, p.MergeCommitSHA, "reconciler")
+				case p.State == "closed": // closed unmerged: a new revert may be opened (sec2-9)
+					_ = a.Store.ClearRevert(u.ID, "reconciler", fmt.Sprintf("revert PR #%d was closed without merging", u.RevertPR))
+				}
 			}
 		}
 	}

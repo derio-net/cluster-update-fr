@@ -102,8 +102,24 @@ func (a *App) Revert(ctx context.Context, id, by string) (string, error) {
 	if !pr.Merged {
 		return "", fmt.Errorf("app: PR #%d is not merged", u.PR)
 	}
-	if u.RevertPR > 0 && u.RevertSHA == "" {
-		return "", fmt.Errorf("app: revert PR #%d is already open for %s", u.RevertPR, id)
+	if u.RevertSHA != "" {
+		return "", fmt.Errorf("app: %s's revert is already merged", id)
+	}
+	if u.RevertPR > 0 {
+		// Ask GitHub about the recorded revert PR, live (sec2-9).
+		rp, err := a.GitHub.PR(ctx, u.RevertPR)
+		switch {
+		case err != nil:
+			return "", fmt.Errorf("app: revert PR #%d unreadable: %w", u.RevertPR, err)
+		case rp.Merged:
+			_ = a.Store.MarkRevertMerged(id, rp.MergeCommitSHA, by)
+			_ = a.Store.Save()
+			return "", fmt.Errorf("app: revert PR #%d is already merged", u.RevertPR)
+		case rp.State == "closed":
+			_ = a.Store.ClearRevert(id, by, fmt.Sprintf("revert PR #%d was closed without merging; opening a new one", u.RevertPR))
+		default:
+			return "", fmt.Errorf("app: revert PR #%d is already open for %s", u.RevertPR, id)
+		}
 	}
 	files, err := a.GitHub.PRFiles(ctx, u.PR)
 	if err != nil {

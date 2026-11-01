@@ -134,7 +134,7 @@ func (g *fakeGitHub) OpenPRs(context.Context) ([]forge.PR, error) {
 		for _, m := range g.merged {
 			gone = gone || m == p.Number
 		}
-		if !gone {
+		if !gone && p.State != "closed" {
 			if p.BaseRef == "" {
 				p.BaseRef = "main" // GitHub always reports the base
 			}
@@ -803,6 +803,43 @@ func TestRevertIsRolledBackOnlyWhenMergedAndVerified(t *testing.T) {
 	a.Cycle(context.Background())
 	if u, _ := a.Store.Get("pr-7"); u.State != store.RolledBack {
 		t.Fatalf("revert merged and verified: %+v", u)
+	}
+}
+
+// sec2-9: a revert PR closed without merging does not block a new revert —
+// Revert reads it live, and the reconciler clears it.
+func TestClosedRevertPRDoesNotBlockANewOne(t *testing.T) {
+	for _, via := range []string{"revert", "reconciler"} {
+		t.Run(via, func(t *testing.T) {
+			now := t0
+			a, gh, _, _ := newApp(t, &now, false)
+			a.Cycle(context.Background())
+			if _, err := a.Revert(context.Background(), "pr-7", "derio"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Revert(context.Background(), "pr-7", "derio"); err == nil {
+				t.Fatal("a second revert while the first is open")
+			}
+			gh.mu.Lock()
+			for i := range gh.prs {
+				if gh.prs[i].Number == 500 {
+					gh.prs[i].State = "closed"
+				}
+			}
+			gh.mu.Unlock()
+			if via == "reconciler" {
+				a.Cycle(context.Background())
+				if u, _ := a.Store.Get("pr-7"); u.RevertPR != 0 {
+					t.Fatalf("closed revert PR still recorded: %+v", u)
+				}
+			}
+			if _, err := a.Revert(context.Background(), "pr-7", "derio"); err != nil {
+				t.Fatalf("a new revert after the first was closed: %v", err)
+			}
+			if u, _ := a.Store.Get("pr-7"); u.RevertPR != 501 {
+				t.Fatalf("new revert PR = %d", u.RevertPR)
+			}
+		})
 	}
 }
 

@@ -339,6 +339,24 @@ func (s *Store) MarkRevertMerged(id, sha, by string) error {
 	return nil
 }
 
+// ClearRevert forgets an open revert PR that was closed without merging, so
+// a new revert can be opened (sec2-9). The update's state is unchanged.
+func (s *Store) ClearRevert(id, by, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.d.Updates[id]
+	if !ok {
+		return ErrUnknown
+	}
+	if u.RevertPR == 0 || u.RevertSHA != "" {
+		return nil
+	}
+	pr := u.RevertPR
+	u.RevertPR = 0
+	s.appendEvent(Event{At: s.now(), Update: id, Action: "revert-cleared", By: by, PR: pr, Reason: reason})
+	return nil
+}
+
 // Reopen moves an ABANDONED update back to pending (a new session for an
 // update an earlier session ended without merging). Other states: no-op.
 func (s *Store) Reopen(id, by, reason string) error {
