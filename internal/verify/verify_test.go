@@ -127,6 +127,23 @@ func TestWorkloadOutcome(t *testing.T) {
 	}
 }
 
+// c1c-r15: an app whose smoke file holds only exec-probe checks (which the
+// console cannot run) is verified by rollout health — explicitly, and said
+// so — instead of failing every update forever.
+func TestExecProbeOnlySmokeIsVerifiedByRolloutHealth(t *testing.T) {
+	ctx := context.Background()
+	snap := &live.Snapshot{Apps: []live.Application{app("merge", "Healthy", "Succeeded")}, Errors: map[string]string{}}
+	probe := SmokeResult{App: "litellm", Checks: []CheckResult{{Name: "exec-probe pg_isready", Status: CheckSkipped, Detail: "operator-run: needs a shell"}}}
+	o := Workload(ctx, WorkloadInput{Apps: []string{"litellm"}, MergeSHA: "merge", Repo: "derio-net/frank", Snapshot: snap, Ancestry: ancestry{}, Smoke: map[string]SmokeResult{"litellm": probe}})
+	if o.To != OutcomeVerified || !strings.Contains(o.Reason, "rollout health") || !strings.Contains(o.Reason, "pg_isready") {
+		t.Fatalf("exec-probe only: %+v", o)
+	}
+	empty := SmokeResult{App: "litellm"}
+	if o := Workload(ctx, WorkloadInput{Apps: []string{"litellm"}, MergeSHA: "merge", Repo: "derio-net/frank", Snapshot: snap, Ancestry: ancestry{}, Smoke: map[string]SmokeResult{"litellm": empty}}); o.To != OutcomeFailed {
+		t.Errorf("no smoke declaration at all still fails: %+v", o)
+	}
+}
+
 func TestOSOutcome(t *testing.T) {
 	decl := frankrepo.ClusterVersions{Talos: "1.13.4", Kubernetes: "1.35.3"}
 	nodes := func(talos ...string) *live.Snapshot {

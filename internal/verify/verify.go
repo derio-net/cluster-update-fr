@@ -55,6 +55,19 @@ func (r SmokeResult) Passed() bool {
 	return ran
 }
 
+// OperatorRunOnly returns the check names when EVERY check is an
+// operator-run exec-probe (nil otherwise, or when there are no checks).
+func (r SmokeResult) OperatorRunOnly() []string {
+	var names []string
+	for _, c := range r.Checks {
+		if c.Status != CheckSkipped {
+			return nil
+		}
+		names = append(names, c.Name)
+	}
+	return names
+}
+
 // FirstFailure names the first failing check ("" if none).
 func (r SmokeResult) FirstFailure() string {
 	for _, c := range r.Checks {
@@ -259,6 +272,13 @@ func Workload(ctx context.Context, in WorkloadInput) Outcome {
 			return Outcome{To: OutcomeFailed, Rollout: rollout, Reason: "failed at step smoke " + name + " — " + f}
 		}
 		if !r.Passed() {
+			if probes := r.OperatorRunOnly(); len(probes) > 0 {
+				// Declared, but nothing the console can run: the applied
+				// revision + Healthy above IS the verification, and the
+				// History says so explicitly (c1c-r15).
+				summaries = append(summaries, name+": verified by rollout health only — its smoke checks are operator-run exec-probes ("+strings.Join(probes, ", ")+")")
+				continue
+			}
 			return Outcome{To: OutcomeFailed, Rollout: rollout, Reason: "no runnable smoke check for " + name}
 		}
 		summaries = append(summaries, r.Summary())
