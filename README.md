@@ -45,6 +45,17 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 | `OPS_LISTEN` | `:9090` | `/healthz`, `/metrics` — no pages, no actions | kubelet probes, VictoriaMetrics |
 | `SESSION_API_LISTEN` | `:8081` | `POST /api/sessions/{id}/step`, `/finish` (session step token) | upgrade-session pods |
 
+### Deployment shape
+
+The console is a **single writer**: `replicas: 1`, Deployment
+`strategy: Recreate`, one RWO PVC at `STATE_DIR`. At start it takes an
+exclusive `flock` on `STATE_DIR/state.lock` and exits if another process holds
+it, so a RollingUpdate overlap or a second replica fails loudly instead of
+racing the state file. Session starts write the target lock and the session
+record (with its step-token hash) to disk *before* the pod is created; a pod
+found without a record is adopted only if its own creds Secret yields the
+token, otherwise it is ended.
+
 ## Configuration
 
 Every credential is optional; a missing one disables only what needs it.

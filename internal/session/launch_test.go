@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/derio-net/cluster-update-fr/internal/kube"
+	"github.com/derio-net/cluster-update-fr/internal/store"
 )
 
 // fakeKube stores created objects by "resource/name" and enforces the real
@@ -63,8 +64,14 @@ func (f *fakeKube) Delete(_ context.Context, ns, res, name string) error {
 	}
 	k := res + "/" + name
 	f.deletes = append(f.deletes, k)
-	if _, ok := f.objects[k]; !ok {
+	m, ok := f.objects[k]
+	if !ok {
 		return &kube.APIError{Code: 404, Reason: "NotFound"}
+	}
+	// The real client reads the live object and refuses one without the
+	// console's managed-by label.
+	if labels, _ := m["metadata"].(map[string]any)["labels"].(map[string]any); labels[kube.ManagedByLabel] != kube.ManagedBy {
+		return kube.ErrForbiddenWrite
 	}
 	delete(f.objects, k)
 	return nil
@@ -81,6 +88,19 @@ func (f *fakeKube) Get(_ context.Context, path string, out any) error {
 	}
 	if strings.HasPrefix(k, "pods/") {
 		m["status"] = map[string]any{"phase": f.phase}
+	}
+	if sd, ok := m["stringData"].(map[string]any); ok { // the API server returns data, base64
+		cp := map[string]any{}
+		for k, v := range m {
+			cp[k] = v
+		}
+		data := map[string]any{}
+		for k, v := range sd {
+			data[k] = base64.StdEncoding.EncodeToString([]byte(v.(string)))
+		}
+		delete(cp, "stringData")
+		cp["data"] = data
+		m = cp
 	}
 	b, _ := json.Marshal(m)
 	return json.Unmarshal(b, out)
@@ -230,16 +250,83 @@ func TestStartTwiceAttachesInsteadOfCreating(t *testing.T) {
 	}
 }
 
-func TestPodGoneMidCreateIsTreatedAsExisting(t *testing.T) {
+// A pod nobody recorded and whose step token cannot be recovered is never
+// attached to: Start fails loudly and the lock is not left held (c1s-r6).
+func TestUnrecordedPodWithoutTokenIsNotAttached(t *testing.T) {
 	now := time.Unix(1000, 0)
 	k := newFake()
 	l := launcher(t, k, &now)
-	// Someone (a racing start) already created the pod but not via us.
 	k.objects["pods/"+PodName("pr-9")] = map[string]any{"metadata": map[string]any{"name": PodName("pr-9")}}
 	_, created, err := l.Start(context.Background(), req("pr-9", TypeChartMajor, "grafana"))
-	if err != nil || created {
-		t.Fatalf("existing pod: created=%v err=%v", created, err)
+	if err == nil || created {
+		t.Fatalf("planted pod: created=%v err=%v", created, err)
 	}
+	if _, ok := l.Get("pr-9"); ok {
+		t.Error("no record may be made for a pod whose token is unknown")
+	}
+	if h := (Locks{Store: l.Store}).Holder(Target(TypeChartMajor, "frank", "grafana")); h != "" {
+		t.Errorf("lock leaked to %q", h)
+	}
+}
+
+// After a restart that lost the record, the running pod is adopted with the
+// token hash rebuilt from its own creds Secret, so step reporting keeps
+// working (c1s-r6).
+func TestAttachWithoutRecordRebuildsTheTokenHash(t *testing.T) {
+	now := time.Unix(1000, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	if _, _, err := l.Start(context.Background(), req("pr-5", TypeChartMajor, "grafana")); err != nil {
+		t.Fatal(err)
+	}
+	tok := l.StepToken("pr-5")
+	_ = l.Store.PutBlob(sessionBlob, map[string]Record{}) // the record is lost
+	l2 := &Launcher{Kube: k, Store: l.Store, Namespace: l.Namespace, Image: l.Image, CredDir: l.CredDir, Now: l.Now}
+	rec, created, err := l2.Start(context.Background(), req("pr-5", TypeChartMajor, "grafana"))
+	if err != nil || created || rec.TokenHash == "" {
+		t.Fatalf("adopt: rec=%+v created=%v err=%v", rec, created, err)
+	}
+	if err := l2.StepStarted("pr-5", tok, "helm upgrade"); err != nil {
+		t.Fatalf("the original step token must work after adoption: %v", err)
+	}
+}
+
+// Write-ahead (c1s-r6): the lock and the record are on disk before the pod
+// is created, so a crash right after the create leaves nothing unaccounted.
+func TestLockAndRecordAreSavedBeforeThePod(t *testing.T) {
+	now := time.Unix(1000, 0)
+	k := newFake()
+	dir := t.TempDir()
+	st, err := store.Open(dir, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	l := launcher(t, k, &now)
+	l.Store = st
+	var onDisk string
+	l.Kube = podHook{k, func() {
+		b, _ := os.ReadFile(filepath.Join(dir, "state.json"))
+		onDisk = string(b)
+	}}
+	if _, _, err := l.Start(context.Background(), req("pr-3", TypeChartMajor, "grafana")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(onDisk, "session-locks") || !strings.Contains(onDisk, "token_hash") {
+		t.Fatalf("state on disk at pod create lacks the lock or the record:\n%s", onDisk)
+	}
+}
+
+type podHook struct {
+	*fakeKube
+	before func()
+}
+
+func (p podHook) Create(ctx context.Context, ns, res string, obj any) error {
+	if res == "pods" {
+		p.before()
+	}
+	return p.fakeKube.Create(ctx, ns, res, obj)
 }
 
 func TestSessionSecretsAreScrubbed(t *testing.T) {

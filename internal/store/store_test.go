@@ -22,7 +22,24 @@ func open(t *testing.T) (*Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(s.Close)
 	return s, dir
+}
+
+// Single writer (c1s-r6): a second console on the same state directory (a
+// second replica, or a RollingUpdate overlap) must refuse to start rather
+// than race the first one's writes.
+func TestSecondWriterIsRefused(t *testing.T) {
+	s, dir := open(t)
+	if _, err := Open(dir, nil); !errors.Is(err, ErrLocked) {
+		t.Fatalf("second Open on a held state dir: %v", err)
+	}
+	s.Close()
+	s2, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open after Close: %v", err)
+	}
+	s2.Close()
 }
 
 func TestLifecycleAndHistory(t *testing.T) {
@@ -103,6 +120,7 @@ func TestPersistenceAndCorruptFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "state.json.tmp")); !os.IsNotExist(err) {
 		t.Error("temp file left behind: save must write temp then rename")
 	}
+	s.Close()
 	s2, err := Open(dir, func() time.Time { return t0 })
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +134,7 @@ func TestPersistenceAndCorruptFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	s2.Close()
 	s3, err := Open(dir, func() time.Time { return t0 })
 	if err != nil {
 		t.Fatalf("a corrupt state file must not stop the console: %v", err)

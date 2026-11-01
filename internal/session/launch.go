@@ -95,6 +95,7 @@ type Launcher struct {
 	IdleTimeout time.Duration
 	MaxLifetime time.Duration
 
+	startMu  sync.Mutex // serialises Start and the lifecycle Tick
 	mu       sync.Mutex
 	sets     map[string]*scrub.Set
 	tokens   map[string]string // in memory only; the store keeps a hash
@@ -165,6 +166,11 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	if l.Image == "" {
 		return Record{}, false, ErrNoImage
 	}
+	// Starts are serialised: the console is the single writer of its state
+	// (store.ErrLocked), so in-process serialisation makes every Start
+	// observe the previous one's records and objects.
+	l.startMu.Lock()
+	defer l.startMu.Unlock()
 	target := Target(req.Type, req.Cluster, req.App)
 	locks := Locks{Store: l.Store}
 	if err := locks.Acquire(target, req.UpgradeID); err != nil {
@@ -174,12 +180,36 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	release := func() {
 		if _, ok := l.Get(req.UpgradeID); !ok {
 			locks.Release(target, req.UpgradeID)
+			_ = l.Store.Save()
 		}
+	}
+	// Write-ahead: the lock is on disk before any pod can exist, so a crash
+	// after the create never leaves a pod nobody's lock covers.
+	if err := l.Store.Save(); err != nil {
+		release()
+		return Record{}, false, err
 	}
 	pod := PodName(req.UpgradeID)
 	var existing struct{}
 	if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "pods", pod), &existing); err == nil {
-		rec := l.ensureRecord(req, target, pod)
+		if rec, ok := l.Get(req.UpgradeID); ok && rec.TokenHash != "" {
+			l.Touch(req.UpgradeID)
+			rec, _ = l.Get(req.UpgradeID)
+			return rec, false, nil
+		}
+		// A pod with no record (the console restarted between the create
+		// and the record, or the state was lost): the step token must be
+		// recovered from its own creds Secret, or the session cannot report
+		// steps and is ended instead of running unaccounted for.
+		rec, err := l.adopt(ctx, req, target, pod)
+		if err != nil {
+			_ = l.cleanup(ctx, pod)
+			_ = l.update(func(m map[string]Record) error { delete(m, req.UpgradeID); return nil })
+			locks.Release(target, req.UpgradeID)
+			_ = l.Store.Save()
+			l.Store.AddEvent(store.Event{Update: req.UpgradeID, Action: "session-ended", By: "launcher", Reason: "found a session pod with no record: " + err.Error()})
+			return Record{}, false, fmt.Errorf("session: pod %s had no record and could not be adopted (%v); it was ended — start again", pod, err)
+		}
 		return rec, false, nil
 	} else if !kube.IsNotFound(err) {
 		release()
@@ -188,6 +218,20 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 
 	token, err := randomToken()
 	if err != nil {
+		release()
+		return Record{}, false, err
+	}
+	sum := sha256.Sum256([]byte(token))
+	now := l.now()
+	rec := Record{ID: req.UpgradeID, Type: req.Type, Target: target, Pod: pod, Cluster: req.Cluster, App: req.App,
+		StartedAt: now, LastActivity: now, TokenHash: hex.EncodeToString(sum[:])}
+	// Write-ahead: the record (and its token hash) is on disk before the pod.
+	if err := l.update(func(m map[string]Record) error { m[rec.ID] = rec; return nil }); err != nil {
+		release()
+		return Record{}, false, err
+	}
+	if err := l.Store.Save(); err != nil {
+		_ = l.update(func(m map[string]Record) error { delete(m, rec.ID); return nil })
 		release()
 		return Record{}, false, err
 	}
@@ -213,7 +257,9 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 		for _, c := range created {
 			_ = l.Kube.Delete(context.Background(), l.Namespace, c.res, c.name)
 		}
+		_ = l.update(func(m map[string]Record) error { delete(m, req.UpgradeID); return nil })
 		locks.Release(target, req.UpgradeID)
+		_ = l.Store.Save()
 	}
 	for _, obj := range []struct {
 		res, name string
@@ -224,25 +270,13 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 		{"pods", pod, l.podSpec(req, pod, labels)},
 	} {
 		if err := l.Kube.Create(ctx, l.Namespace, obj.res, obj.body); err != nil {
-			if kube.IsConflict(err) {
-				if obj.res == "pods" { // a racing start won: attach to it
-					rec := l.ensureRecord(req, target, pod)
-					return rec, false, nil
-				}
+			if kube.IsConflict(err) && obj.res != "pods" {
 				continue
 			}
 			rollback()
 			return Record{}, false, err
 		}
 		created = append(created, struct{ res, name string }{obj.res, obj.name})
-	}
-	sum := sha256.Sum256([]byte(token))
-	now := l.now()
-	rec := Record{ID: req.UpgradeID, Type: req.Type, Target: target, Pod: pod, Cluster: req.Cluster, App: req.App,
-		StartedAt: now, LastActivity: now, TokenHash: hex.EncodeToString(sum[:])}
-	if err := l.update(func(m map[string]Record) error { m[rec.ID] = rec; return nil }); err != nil {
-		rollback()
-		return Record{}, false, err
 	}
 	l.mu.Lock()
 	if l.sets == nil {
@@ -255,20 +289,35 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	return rec, true, nil
 }
 
-func (l *Launcher) ensureRecord(req Request, target, pod string) Record {
-	var rec Record
+// adopt rebuilds the record of a running pod that has none, from its creds
+// Secret: the Secret must be the console's (managed-by label) and this
+// session's (run-id label), and must hold a step token. The token hash is
+// recomputed from it; nothing about the pod is trusted otherwise.
+func (l *Launcher) adopt(ctx context.Context, req Request, target, pod string) (Record, error) {
+	var sec struct {
+		Metadata kube.Meta         `json:"metadata"`
+		Data     map[string]string `json:"data"`
+	}
+	if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "secrets", SecretName(req.UpgradeID)), &sec); err != nil {
+		return Record{}, fmt.Errorf("creds Secret unreadable: %w", err)
+	}
+	if sec.Metadata.Labels[kube.ManagedByLabel] != kube.ManagedBy || sec.Metadata.Labels[LabelRunID] != req.UpgradeID {
+		return Record{}, errors.New("creds Secret is not this session's")
+	}
+	tok, err := base64.StdEncoding.DecodeString(sec.Data[StepTokenKey])
+	if err != nil || len(tok) == 0 {
+		return Record{}, errors.New("creds Secret holds no step token")
+	}
+	sum := sha256.Sum256(tok)
 	now := l.now()
-	_ = l.update(func(m map[string]Record) error {
-		r, ok := m[req.UpgradeID]
-		if !ok {
-			r = Record{ID: req.UpgradeID, Type: req.Type, Target: target, Pod: pod, Cluster: req.Cluster, App: req.App, StartedAt: now}
-		}
-		r.LastActivity = now
-		m[req.UpgradeID] = r
-		rec = r
-		return nil
-	})
-	return rec
+	rec := Record{ID: req.UpgradeID, Type: req.Type, Target: target, Pod: pod, Cluster: req.Cluster, App: req.App,
+		StartedAt: now, LastActivity: now, TokenHash: hex.EncodeToString(sum[:])}
+	if err := l.update(func(m map[string]Record) error { m[rec.ID] = rec; return nil }); err != nil {
+		return Record{}, err
+	}
+	_ = l.Store.Save()
+	l.Store.AddEvent(store.Event{Update: req.UpgradeID, Action: "session-adopted", Reason: "rebuilt the record of running pod " + pod + " from its creds Secret"})
+	return rec, nil
 }
 
 func randomToken() (string, error) {

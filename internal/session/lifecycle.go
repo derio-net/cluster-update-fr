@@ -71,6 +71,9 @@ func (l *Launcher) Warnings() []string {
 
 // Tick enforces the idle timeout, the maximum lifetime and dead pods.
 func (l *Launcher) Tick(ctx context.Context) []Ended {
+	// Never between a Start's write-ahead record and its pod create.
+	l.startMu.Lock()
+	defer l.startMu.Unlock()
 	now := l.now()
 	var ended []Ended
 	for _, r := range l.records() {

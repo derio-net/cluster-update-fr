@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/derio-net/cluster-update-fr/internal/engine"
@@ -129,13 +130,21 @@ type Store struct {
 	path    string
 	now     func() time.Time
 	d       data
+	lock    *os.File
 	Warning string // set when the state file was unreadable at Open
 }
 
 // maxHistory bounds the history kept in the file.
 const maxHistory = 5000
 
-// Open loads dir/state.json (or starts empty).
+// ErrLocked means another process holds the state directory: the console is
+// a single writer (one replica, Deployment strategy Recreate), and a second
+// one must exit instead of racing the first one's writes.
+var ErrLocked = errors.New("store: the state directory is held by another console process (single writer: replicas 1, strategy Recreate)")
+
+// Open takes the state directory's exclusive lock (dir/state.lock, flock,
+// non-blocking) and loads dir/state.json (or starts empty). Close releases
+// the lock.
 func Open(dir string, now func() time.Time) (*Store, error) {
 	if now == nil {
 		now = time.Now
@@ -143,13 +152,25 @@ func Open(dir string, now func() time.Time) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{path: filepath.Join(dir, "state.json"), now: now}
+	lock, err := os.OpenFile(filepath.Join(dir, "state.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrLocked
+		}
+		return nil, fmt.Errorf("store: lock: %w", err)
+	}
+	s := &Store{path: filepath.Join(dir, "state.json"), now: now, lock: lock}
 	s.d = empty()
 	b, err := os.ReadFile(s.path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return s, nil
 	case err != nil:
+		s.Close()
 		return nil, err
 	}
 	var d data
@@ -162,6 +183,17 @@ func Open(dir string, now func() time.Time) (*Store, error) {
 	s.d = d
 	s.fill()
 	return s, nil
+}
+
+// Close releases the state directory lock. The store must not be used after.
+func (s *Store) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lock != nil {
+		_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
+		_ = s.lock.Close()
+		s.lock = nil
+	}
 }
 
 func empty() data {
