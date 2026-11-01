@@ -190,6 +190,85 @@ func secretKeys(m map[string]any) []string {
 	return keys
 }
 
+// p5-relay-1: the pod matches the upgrade-session image's interface
+// (agent-images#171) — uid 1000, HOME /home/claude on an emptyDir, /tmp an
+// emptyDir, read-only root, all caps dropped, NO command (the image's tini
+// entrypoint runs; frank's admission policy refuses command:), and the
+// client minors the image selects.
+func TestPodMatchesTheUpgradeSessionImage(t *testing.T) {
+	now := time.Unix(1000, 0)
+	cases := []struct {
+		typ, talos, k8s, wantTalos, wantK8s string
+	}{
+		{TypeFrankOS, "1.13.4", "1.36.2", "1.13", "1.36"},
+		{TypeHopOS, "v1.14.0", "1.37.1", "1.14", "1.37"},
+		{TypeChartMajor, "1.12.6", "1.35.3", "1.12", "1.35"},
+		{TypeStateful, "", "", DefaultTalosMinor, DefaultK8sMinor},            // nothing named: current cluster
+		{TypeRollouts, "1.9.5", "1.30.0", DefaultTalosMinor, DefaultK8sMinor}, // unsupported: never passed through
+	}
+	for _, c := range cases {
+		k := newFake()
+		l := launcher(t, k, &now)
+		id := c.typ + "-img-1"
+		r := req(id, c.typ, "paperclip-db")
+		r.TalosVersion, r.KubectlVersion = c.talos, c.k8s
+		if _, _, err := l.Start(context.Background(), r); err != nil {
+			t.Fatalf("%s: %v", c.typ, err)
+		}
+		spec := k.objects["pods/"+PodName(id)]["spec"].(map[string]any)
+		psc := spec["securityContext"].(map[string]any)
+		if psc["runAsUser"] != float64(1000) {
+			t.Errorf("%s: runAsUser = %v", c.typ, psc["runAsUser"])
+		}
+		var agent map[string]any
+		for _, x := range spec["containers"].([]any) {
+			if x.(map[string]any)["name"] == "session" {
+				agent = x.(map[string]any)
+			}
+		}
+		if agent == nil {
+			t.Fatalf("%s: no session container", c.typ)
+		}
+		if _, ok := agent["command"]; ok {
+			t.Errorf("%s: the session container sets command: (the admission policy refuses it)", c.typ)
+		}
+		csc := agent["securityContext"].(map[string]any)
+		if csc["readOnlyRootFilesystem"] != true || csc["capabilities"].(map[string]any)["drop"].([]any)[0] != "ALL" {
+			t.Errorf("%s: container securityContext = %v", c.typ, csc)
+		}
+		env := map[string]string{}
+		for _, e := range agent["env"].([]any) {
+			em := e.(map[string]any)
+			if v, ok := em["value"].(string); ok {
+				env[em["name"].(string)] = v
+			}
+		}
+		if env["HOME"] != "/home/claude" || env["UPGRADE_TALOS_MINOR"] != c.wantTalos || env["UPGRADE_K8S_MINOR"] != c.wantK8s {
+			t.Errorf("%s: env HOME=%q talos=%q k8s=%q", c.typ, env["HOME"], env["UPGRADE_TALOS_MINOR"], env["UPGRADE_K8S_MINOR"])
+		}
+		mounts := map[string]string{}
+		for _, m := range agent["volumeMounts"].([]any) {
+			mm := m.(map[string]any)
+			mounts[mm["mountPath"].(string)] = mm["name"].(string)
+		}
+		empty := map[string]bool{}
+		for _, v := range spec["volumes"].([]any) {
+			vm := v.(map[string]any)
+			if _, ok := vm["emptyDir"]; ok {
+				empty[vm["name"].(string)] = true
+			}
+		}
+		for _, p := range []string{"/home/claude", "/tmp"} {
+			if !empty[mounts[p]] {
+				t.Errorf("%s: %s is not an emptyDir (mounts %v)", c.typ, p, mounts)
+			}
+		}
+		if mounts["/home/claude/brief"] != "brief" || mounts["/home/claude/AGENTS.md"] != "brief" {
+			t.Errorf("%s: brief not under /home/claude: %v", c.typ, mounts)
+		}
+	}
+}
+
 func TestStartBuildsAHardenedPodPerType(t *testing.T) {
 	now := time.Unix(1000, 0)
 	wantCreds := map[string][]string{

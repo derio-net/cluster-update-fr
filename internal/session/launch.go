@@ -647,9 +647,45 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// The upgrade-session image's interface (agent-images#171): user `claude`
+// uid 1000, HOME /home/claude, ENTRYPOINT tini → upgrade-session-entrypoint.
+// The pod never sets `command:` (frank's admission policy refuses it), so
+// the image's own entrypoint always runs.
+const (
+	SessionUID  = 1000
+	SessionHome = "/home/claude"
+)
+
+// Supported client minors of the image (talosctl / kubectl it can select).
+var (
+	talosMinors = map[string]bool{"1.12": true, "1.13": true, "1.14": true}
+	k8sMinors   = map[string]bool{"1.34": true, "1.35": true, "1.36": true, "1.37": true}
+)
+
+// Defaults when a step names no (supported) version: frank's current
+// cluster (Talos 1.12, Kubernetes 1.35).
+const (
+	DefaultTalosMinor = "1.12"
+	DefaultK8sMinor   = "1.35"
+)
+
+// minorOf reduces "v1.13.4" / "1.13" to "1.13" if allowed has it, else def.
+func minorOf(version string, allowed map[string]bool, def string) string {
+	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) >= 2 {
+		if m := parts[0] + "." + parts[1]; allowed[m] {
+			return m
+		}
+	}
+	return def
+}
+
 func (l *Launcher) podSpec(req Request, name string, labels map[string]string) map[string]any {
 	env := []map[string]any{
-		{"name": "HOME", "value": "/home/agent"},
+		{"name": "HOME", "value": SessionHome},
+		{"name": "UPGRADE_TALOS_MINOR", "value": minorOf(req.TalosVersion, talosMinors, DefaultTalosMinor)},
+		{"name": "UPGRADE_K8S_MINOR", "value": minorOf(req.KubectlVersion, k8sMinors, DefaultK8sMinor)},
 		{"name": "UPGRADE_ID", "value": req.UpgradeID},
 		{"name": "UPGRADE_TYPE", "value": req.Type},
 		{"name": "UPGRADE_CLUSTER", "value": req.Cluster},
@@ -665,7 +701,7 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string) m
 		"automountServiceAccountToken": typeSA[req.Type],
 		"enableServiceLinks":           false,
 		"securityContext": map[string]any{
-			"runAsNonRoot": true, "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
+			"runAsNonRoot": true, "runAsUser": SessionUID, "runAsGroup": SessionUID, "fsGroup": SessionUID,
 			"seccompProfile": map[string]any{"type": "RuntimeDefault"},
 		},
 		"containers": []map[string]any{{
@@ -681,12 +717,12 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string) m
 				"limits":   map[string]any{"cpu": "2", "memory": "4Gi"},
 			},
 			"volumeMounts": []map[string]any{
-				{"name": "home", "mountPath": "/home/agent"},
+				{"name": "home", "mountPath": SessionHome},
 				{"name": "tmp", "mountPath": "/tmp"},
 				{"name": "credentials", "mountPath": "/run/credentials", "readOnly": true},
-				{"name": "brief", "mountPath": "/home/agent/brief", "readOnly": true},
-				{"name": "brief", "mountPath": "/home/agent/AGENTS.md", "subPath": "AGENTS.md", "readOnly": true},
-				{"name": "brief", "mountPath": "/home/agent/CLAUDE.md", "subPath": "CLAUDE.md", "readOnly": true},
+				{"name": "brief", "mountPath": SessionHome + "/brief", "readOnly": true},
+				{"name": "brief", "mountPath": SessionHome + "/AGENTS.md", "subPath": "AGENTS.md", "readOnly": true},
+				{"name": "brief", "mountPath": SessionHome + "/CLAUDE.md", "subPath": "CLAUDE.md", "readOnly": true},
 			},
 		}},
 		"volumes": []map[string]any{
