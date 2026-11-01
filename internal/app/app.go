@@ -374,6 +374,7 @@ func (a *App) Cycle(ctx context.Context) View {
 		for _, end := range a.Launcher.Tick(ctx) {
 			a.logf("session %s ended: %s", end.ID, end.Outcome)
 		}
+		v.Warnings = append(v.Warnings, a.sessionAlarms(ctx)...)
 		for _, w := range a.Launcher.Warnings() {
 			v.Warnings = append(v.Warnings, w)
 			a.send(ctx, "⏳ "+escape(w))
@@ -617,6 +618,27 @@ func (a *App) alarms(ctx context.Context, inv *inventory.Inventory, frank, hop *
 		}
 		return v.Alarms[i].VulnID < v.Alarms[j].VulnID
 	})
+}
+
+// sessionAlarms sends the launcher's security alarms (a session ended at the
+// hard ceiling or step cap, a foreign object under a session's name) to
+// #security. One that cannot be sent goes to the alarm outbox and is retried
+// with the vulnerability alarms; none is ever dropped silently.
+func (a *App) sessionAlarms(ctx context.Context) []string {
+	if a.Launcher == nil {
+		return nil
+	}
+	msgs := a.Launcher.Alarms()
+	for _, m := range msgs {
+		text := "🚨 <b>Upgrade session</b> — " + escape(m)
+		a.logf("security alarm: %s", m)
+		if err := a.sendErr(ctx, text); err != nil {
+			var outbox []string
+			a.Store.GetBlob(blobOutbox, &outbox)
+			_ = a.Store.PutBlob(blobOutbox, append(outbox, text))
+		}
+	}
+	return msgs
 }
 
 func (a *App) sendErr(ctx context.Context, text string) error {

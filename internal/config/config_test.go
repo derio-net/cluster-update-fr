@@ -113,6 +113,27 @@ func TestTelegramConfigured(t *testing.T) {
 	}
 }
 
+func TestSessionHardCeilingAndStepCap(t *testing.T) {
+	c, err := Load(env(map[string]string{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.HardCeiling != 16*time.Hour || c.StepCap != 4*time.Hour {
+		t.Errorf("defaults: ceiling %v, step cap %v", c.HardCeiling, c.StepCap)
+	}
+	c, _ = Load(env(map[string]string{"SESSION_MAX_LIFETIME": "3h"}))
+	if c.HardCeiling != 6*time.Hour {
+		t.Errorf("ceiling must default to 2x max lifetime: %v", c.HardCeiling)
+	}
+	c, _ = Load(env(map[string]string{"SESSION_HARD_CEILING": "10h", "SESSION_STEP_CAP": "90m"}))
+	if c.HardCeiling != 10*time.Hour || c.StepCap != 90*time.Minute {
+		t.Errorf("explicit: %v / %v", c.HardCeiling, c.StepCap)
+	}
+	if _, err := Load(env(map[string]string{"SESSION_HARD_CEILING": "1h"})); err == nil {
+		t.Error("a ceiling below the max lifetime must be refused")
+	}
+}
+
 func TestBadDurationIsAnError(t *testing.T) {
 	if _, err := Load(env(map[string]string{"SCAN_INTERVAL": "soon"})); err == nil {
 		t.Fatal("want error for malformed duration")

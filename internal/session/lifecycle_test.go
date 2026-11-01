@@ -84,6 +84,50 @@ func TestMaxLifetimeWarnsInsteadOfKillingARunningStep(t *testing.T) {
 	}
 }
 
+// c1s-r1: a session that reports a step as running forever still ends —
+// at the hard ceiling, or when one step passes the per-step cap — with its
+// pod and credentials deleted and a #security alarm.
+func TestHardCeilingAndStepCapEndEvenMidStep(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		advance []time.Duration // StepStarted is re-sent before each advance (a steered agent)
+		want    string
+	}{
+		{"hard ceiling", []time.Duration{3 * time.Hour, 3 * time.Hour, 3 * time.Hour, 3 * time.Hour, 3*time.Hour + time.Minute, time.Hour}, "hard ceiling"},
+		{"step cap", []time.Duration{4*time.Hour + time.Minute}, "per-step cap"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Unix(0, 0)
+			k := newFake()
+			l := launcher(t, k, &now)
+			l.HardCeiling, l.StepCap = 16*time.Hour, 4*time.Hour
+			start(t, l, "frank-os-1", TypeFrankOS)
+			tok := l.StepToken("frank-os-1")
+			var ended []Ended
+			for _, d := range tc.advance {
+				_ = l.StepFinished("frank-os-1", tok)
+				_ = l.StepStarted("frank-os-1", tok, "talos rollout")
+				now = now.Add(d)
+				if ended = l.Tick(context.Background()); len(ended) > 0 {
+					break
+				}
+			}
+			if len(ended) != 1 || !ended[0].Alarm || !strings.Contains(ended[0].Outcome, tc.want) {
+				t.Fatalf("ended = %+v", ended)
+			}
+			if _, ok := k.objects["secrets/"+SecretName("frank-os-1")]; ok {
+				t.Error("credentials survived the forced end")
+			}
+			if _, ok := k.objects["pods/"+PodName("frank-os-1")]; ok {
+				t.Error("pod survived the forced end")
+			}
+			if a := l.Alarms(); len(a) != 1 || !strings.Contains(a[0], tc.want) {
+				t.Errorf("alarms = %v", a)
+			}
+		})
+	}
+}
+
 func TestEndKeepsAScrubbedTranscript(t *testing.T) {
 	now := time.Unix(0, 0)
 	k := newFake()

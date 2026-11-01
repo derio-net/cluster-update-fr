@@ -74,7 +74,13 @@ type Config struct {
 	CITimeout    time.Duration
 	IdleTimeout  time.Duration
 	MaxLifetime  time.Duration
-	ReportHour   int // UTC hour of the daily report
+	// HardCeiling ends a session unconditionally, even mid-step, and alarms
+	// (default 2× MaxLifetime); StepCap ends a session whose single step
+	// runs longer (default 4h). A steered agent cannot hold credentials by
+	// reporting a step as running forever (c1s-r1).
+	HardCeiling time.Duration
+	StepCap     time.Duration
+	ReportHour  int // UTC hour of the daily report
 
 	Telegram Telegram
 
@@ -162,6 +168,8 @@ func Load(getenv func(string) string) (*Config, error) {
 		{"CI_TIMEOUT", 30 * time.Minute, &c.CITimeout},
 		{"SESSION_IDLE_TIMEOUT", 2 * time.Hour, &c.IdleTimeout},
 		{"SESSION_MAX_LIFETIME", 8 * time.Hour, &c.MaxLifetime},
+		{"SESSION_HARD_CEILING", 0, &c.HardCeiling}, // 0 here = derive below
+		{"SESSION_STEP_CAP", 4 * time.Hour, &c.StepCap},
 	}
 	for _, d := range durations {
 		*d.dst = d.def
@@ -172,6 +180,12 @@ func Load(getenv func(string) string) (*Config, error) {
 			}
 			*d.dst = parsed
 		}
+	}
+	if c.HardCeiling == 0 {
+		c.HardCeiling = 2 * c.MaxLifetime
+	}
+	if c.HardCeiling < c.MaxLifetime {
+		return nil, fmt.Errorf("config: SESSION_HARD_CEILING=%s must be at least SESSION_MAX_LIFETIME=%s", c.HardCeiling, c.MaxLifetime)
 	}
 	c.ReportHour = 8
 	if v := strings.TrimSpace(getenv("REPORT_HOUR")); v != "" {

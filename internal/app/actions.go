@@ -243,6 +243,7 @@ func (a *App) StartSession(ctx context.Context, id, by string) (session.Record, 
 	if err == nil && created {
 		a.Store.AddEvent(store.Event{Update: id, Action: "session-requested", By: by})
 	}
+	a.sessionAlarms(ctx) // a refused foreign pod/Secret alarms at once
 	_ = a.Store.Save()
 	return rec, created, err
 }
