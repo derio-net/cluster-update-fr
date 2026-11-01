@@ -90,6 +90,9 @@ type Record struct {
 	SecretUIDs map[string]string `json:"secret_uids,omitempty"`
 	// VerifyUnknown counts consecutive cycles the pod could not be verified.
 	VerifyUnknown int `json:"verify_unknown,omitempty"`
+	// MergeWaiting: a trusted merge request waits for the operator; the
+	// idle clock is paused (the ceiling and max lifetime still bound it).
+	MergeWaiting bool `json:"merge_waiting,omitempty"`
 }
 
 // Ended reports a session the lifecycle ended. Alarm marks a forced end (hard

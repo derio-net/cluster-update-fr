@@ -963,6 +963,42 @@ func TestForeignRevertPRIsRefused(t *testing.T) {
 // sec2-4/5/6: merge requests are keyed by (session, PR) and a PR belongs to
 // the first session that asked; a stored request is not merged for a
 // session that ended (its requests are dropped) or into a terminal update.
+// c1d-r4: waiting for the operator's merge is not idleness — a trusted
+// request pauses the idle clock (the max lifetime still ends the session),
+// and the clock runs again once the PR is merged.
+func TestPendingMergeRequestPausesTheIdleClock(t *testing.T) {
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	a.Cycle(context.Background())
+	const id = "frank-os-talos-1.13.4"
+	if _, _, err := a.StartSession(context.Background(), id, "derio"); err != nil {
+		t.Fatal(err)
+	}
+	p := forge.PR{Number: 80, Title: "talos", HeadSHA: "s80", HeadRef: engine.SessionBranchPrefix + id + "/version", Author: sessionBot, State: "open",
+		HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank", BaseRef: "main", CreatedAt: t0, UpdatedAt: t0}
+	gh.mu.Lock()
+	gh.prs = append(gh.prs, p)
+	gh.commits = map[int][]forge.Commit{80: {signedCommit("s80", sessionBot)}}
+	gh.files = map[int][]string{80: {"versions/frank.yaml"}}
+	gh.mu.Unlock()
+	if err := a.RequestMerge(context.Background(), id, a.Launcher.StepToken(id), 80); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(3 * time.Hour) // past the 2h idle timeout
+	a.Cycle(context.Background())
+	if _, ok := a.Launcher.Get(id); !ok {
+		t.Fatal("ended as idle while its merge request waited for the operator")
+	}
+	if err := a.MergeSessionPR(context.Background(), a.View().SessionPRs[0].Key(), "derio"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2*time.Hour + time.Minute)
+	a.Cycle(context.Background())
+	if _, ok := a.Launcher.Get(id); ok {
+		t.Fatal("after the merge the idle clock must run again")
+	}
+}
+
 func TestSessionPRRequestsAreOwnedAndBounded(t *testing.T) {
 	const id, other = "frank-os-talos-1.13.4", "hop-os-talos-1.13.4"
 	setup := func(t *testing.T) (*App, *fakeGitHub, int) {

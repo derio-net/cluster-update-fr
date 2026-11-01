@@ -81,6 +81,19 @@ func (l *Launcher) step(id, token string, running bool, name string) error {
 	return err
 }
 
+// SetMergeWaiting marks whether a trusted merge request of the session waits
+// for the operator (the idle clock pauses meanwhile — c1d-r4).
+func (l *Launcher) SetMergeWaiting(id string, waiting bool) {
+	now := l.now()
+	_ = l.update(func(m map[string]Record) error {
+		if r, ok := m[id]; ok {
+			r.MergeWaiting, r.LastActivity = waiting, now
+			m[id] = r
+		}
+		return nil
+	})
+}
+
 // Touch records operator activity (attach).
 func (l *Launcher) Touch(id string) {
 	now := l.now()
@@ -194,7 +207,7 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 			ended = append(ended, l.endFor(ctx, r, "ended: maximum lifetime "+l.MaxLifetime.String()+" reached"))
 			continue
 		}
-		if l.IdleTimeout > 0 && now.Sub(r.LastActivity) > l.IdleTimeout {
+		if l.IdleTimeout > 0 && !r.MergeWaiting && now.Sub(r.LastActivity) > l.IdleTimeout {
 			ended = append(ended, l.endFor(ctx, r, "abandoned: idle timeout "+l.IdleTimeout.String()))
 		}
 	}

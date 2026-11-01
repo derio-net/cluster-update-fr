@@ -180,6 +180,9 @@ func (a *App) RequestMerge(ctx context.Context, id, token string, pr int) error 
 		reason += " — untrusted: " + req.Untrusted
 	}
 	a.Store.AddEvent(store.Event{Update: id, Action: "session-merge-requested", By: "session", PR: pr, SHA: p.HeadSHA, Reason: reason})
+	// Waiting for the operator is not idleness (c1d-r4): a trusted request
+	// pauses the idle clock; the ceiling and max lifetime still bound it.
+	a.Launcher.SetMergeWaiting(id, a.hasTrustedRequest(id))
 	_ = a.Store.Save()
 	if checkErr != nil {
 		return fmt.Errorf("%w: PR #%d fails the trust check: %v", ErrBadRequest, pr, checkErr)
@@ -234,6 +237,17 @@ func (a *App) MergeSessionPR(ctx context.Context, key, by string) error {
 		return nil
 	})
 	err = a.Store.MarkMerged(req.Session, sha, pr, by, fmt.Sprintf("session PR #%d merged by %s", pr, by))
+	a.Launcher.SetMergeWaiting(req.Session, a.hasTrustedRequest(req.Session))
 	_ = a.Store.Save()
 	return err
+}
+
+// hasTrustedRequest: the session has a trusted request waiting.
+func (a *App) hasTrustedRequest(id string) bool {
+	for _, r := range a.sessionPRs() {
+		if r.Session == id && r.Untrusted == "" {
+			return true
+		}
+	}
+	return false
 }
