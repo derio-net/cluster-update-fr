@@ -6,9 +6,13 @@
 //
 //	create | delete   pods          <session namespace>
 //	create | delete   secrets       <session namespace>
-//	create | delete   rolebindings  <session namespace>
 //
-// Nothing cluster-scoped, nothing in any other namespace. The check runs
+// Nothing cluster-scoped, nothing in any other namespace, and no RBAC object
+// at all (a RoleBinding is a privilege grant; frank pre-binds every role a
+// session needs). Every object name must start with SessionPrefix; a create
+// must carry the label ManagedByLabel=ManagedBy; a delete first reads the
+// object and refuses unless it carries that label, so the console can never
+// delete something it did not make (c1s-r4). The check runs
 // before a request is built: the namespace must equal the configured session
 // namespace, and both namespace and name must be DNS-1123 labels, so a name
 // carrying '/', '..', '?', '#', '%' or uppercase can never reach a different
@@ -46,8 +50,16 @@ import (
 // the write policy.
 var ErrForbiddenWrite = errors.New("kube: write outside the console's write policy refused")
 
-// SessionPrefix starts the name of every object the console creates.
-const SessionPrefix = "upgrade-session-"
+// SessionPrefix starts the name of every object the console creates (the
+// session pod "us-<id>-<hash>" and its "-creds"/"-brief" Secrets).
+const SessionPrefix = "us-"
+
+// The label every console-created object carries, and the only objects a
+// delete may touch.
+const (
+	ManagedByLabel = "app.kubernetes.io/managed-by"
+	ManagedBy      = "cluster-update-fr"
+)
 
 // APIError is a non-2xx answer from the API server.
 type APIError struct {
@@ -88,7 +100,7 @@ const (
 
 // writable is the resource half of the allowlist; every entry is namespaced
 // and only ever written in the session namespace.
-var writable = map[string]bool{"pods": true, "secrets": true, "rolebindings": true}
+var writable = map[string]bool{"pods": true, "secrets": true}
 
 var dns1123Label = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
@@ -110,7 +122,7 @@ func (p *WritePolicy) allows(v Verb, ns, resource, name string) bool {
 	if !writable[resource] {
 		return false
 	}
-	return ValidName(name, 253)
+	return ValidName(name, 253) && strings.HasPrefix(name, SessionPrefix)
 }
 
 // Client talks to one API server.
@@ -243,8 +255,8 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 // Create POSTs obj into resource in namespace ns, if the write policy allows.
 // The object's metadata.namespace, when set, must equal ns.
 func (c *Client) Create(ctx context.Context, ns, resource string, obj any) error {
-	name, objNS := objectMeta(obj)
-	if (objNS != "" && objNS != ns) || !c.Writes.allows(VerbCreate, ns, resource, name) {
+	m := objectMeta(obj)
+	if (m.Namespace != "" && m.Namespace != ns) || m.Labels[ManagedByLabel] != ManagedBy || !c.Writes.allows(VerbCreate, ns, resource, m.Name) {
 		return ErrForbiddenWrite
 	}
 	body, err := json.Marshal(obj)
@@ -254,12 +266,25 @@ func (c *Client) Create(ctx context.Context, ns, resource string, obj any) error
 	return c.do(ctx, http.MethodPost, collection(ns, resource), body, nil)
 }
 
-// Delete removes ns/resource/name, if the write policy allows.
+// Delete removes ns/resource/name, if the write policy allows AND the live
+// object carries the console's managed-by label. The delete is pinned to
+// the uid that was checked (a precondition), so a swap between the read and
+// the delete fails instead of deleting the new object.
 func (c *Client) Delete(ctx context.Context, ns, resource, name string) error {
 	if !c.Writes.allows(VerbDelete, ns, resource, name) {
 		return ErrForbiddenWrite
 	}
-	return c.do(ctx, http.MethodDelete, collection(ns, resource)+"/"+url.PathEscape(name), []byte(`{"propagationPolicy":"Background"}`), nil)
+	var live struct {
+		Metadata Meta `json:"metadata"`
+	}
+	if err := c.Get(ctx, ObjectPath(ns, resource, name), &live); err != nil {
+		return err
+	}
+	if live.Metadata.Labels[ManagedByLabel] != ManagedBy {
+		return ErrForbiddenWrite
+	}
+	opts, _ := json.Marshal(map[string]any{"propagationPolicy": "Background", "preconditions": map[string]string{"uid": live.Metadata.UID}})
+	return c.do(ctx, http.MethodDelete, ObjectPath(ns, resource, name), opts, nil)
 }
 
 // ObjectPath is the GET path of one namespaced object (segments escaped).
@@ -268,25 +293,28 @@ func ObjectPath(ns, resource, name string) string {
 }
 
 func collection(ns, resource string) string {
-	if resource == "rolebindings" {
-		return "/apis/rbac.authorization.k8s.io/v1/namespaces/" + url.PathEscape(ns) + "/rolebindings"
-	}
 	return "/api/v1/namespaces/" + url.PathEscape(ns) + "/" + url.PathEscape(resource)
 }
 
-func objectMeta(obj any) (name, namespace string) {
+// Meta is the object metadata the write guard reads.
+type Meta struct {
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace"`
+	UID         string            `json:"uid"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+func objectMeta(obj any) Meta {
 	b, err := json.Marshal(obj)
 	if err != nil {
-		return "", ""
+		return Meta{}
 	}
 	var m struct {
-		Metadata struct {
-			Name      string `json:"name"`
-			Namespace string `json:"namespace"`
-		} `json:"metadata"`
+		Metadata Meta `json:"metadata"`
 	}
 	_ = json.Unmarshal(b, &m)
-	return m.Metadata.Name, m.Metadata.Namespace
+	return m.Metadata
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/derio-net/cluster-update-fr/internal/kube"
 	"github.com/derio-net/cluster-update-fr/internal/store"
 )
 
@@ -61,7 +62,7 @@ func PodName(upgradeID string) string {
 	if base == "" {
 		base = "x"
 	}
-	return "us-" + base + "-" + hex.EncodeToString(sum[:])[:8]
+	return kube.SessionPrefix + base + "-" + hex.EncodeToString(sum[:])[:8]
 }
 
 // SecretName is the per-session credentials Secret.

@@ -202,7 +202,7 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 		data[key] = string(b)
 		set.Add(key, string(b))
 	}
-	labels := map[string]string{LabelRunID: req.UpgradeID, LabelType: req.Type, "app.kubernetes.io/managed-by": "cluster-update-fr"}
+	labels := map[string]string{LabelRunID: req.UpgradeID, LabelType: req.Type, kube.ManagedByLabel: kube.ManagedBy}
 	secret := func(name string, d map[string]string) map[string]any {
 		return map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
 			"metadata": map[string]any{"name": name, "namespace": l.Namespace, "labels": labels}, "stringData": d}

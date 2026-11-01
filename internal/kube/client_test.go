@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -119,15 +120,75 @@ func TestWritesOutsideTheSessionNamespaceNeverLeave(t *testing.T) {
 	if n := atomic.LoadInt32(calls); n != 0 {
 		t.Fatalf("refused writes must not reach the API server, saw %d calls", n)
 	}
-	for _, ok := range []struct{ ns, res, name string }{
-		{ns, "pods", "s-1"},
-		{ns, "secrets", "s-1-creds"},
-		{ns, "rolebindings", "upgrade-session-s-1"},
+	managed := map[string]any{ManagedByLabel: ManagedBy}
+	for _, bad := range []map[string]any{
+		{"name": "us-s-1"}, // no managed-by label
+		{"name": "us-s-1", "labels": map[string]any{ManagedByLabel: "helm"}}, // someone else's
+		{"name": "s-1", "labels": managed},                                   // no session prefix
 	} {
-		obj := map[string]any{"metadata": map[string]any{"name": ok.name}}
+		if err := c.Create(ctx, ns, "pods", map[string]any{"metadata": bad}); !errors.Is(err, ErrForbiddenWrite) {
+			t.Errorf("Create %v: %v", bad, err)
+		}
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Fatalf("refused writes must not reach the API server, saw %d calls", n)
+	}
+	for _, ok := range []struct{ ns, res, name string }{
+		{ns, "pods", "us-s-1"},
+		{ns, "secrets", "us-s-1-creds"},
+	} {
+		obj := map[string]any{"metadata": map[string]any{"name": ok.name, "labels": managed}}
 		if err := c.Create(ctx, ok.ns, ok.res, obj); err != nil {
 			t.Errorf("Create %v: %v", ok, err)
 		}
+	}
+}
+
+// A RoleBinding is a privilege grant: the console never writes one, in any
+// namespace, with any name (c1s-r4).
+func TestRoleBindingCreateIsRefused(t *testing.T) {
+	c, calls := server(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(201) })
+	c.Writes = &WritePolicy{SessionNamespace: "upgrade-sessions"}
+	obj := map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+		"metadata": map[string]any{"name": "us-s-1", "labels": map[string]any{ManagedByLabel: ManagedBy}}}
+	if err := c.Create(context.Background(), "upgrade-sessions", "rolebindings", obj); !errors.Is(err, ErrForbiddenWrite) {
+		t.Fatalf("RoleBinding create: %v", err)
+	}
+	if err := c.Delete(context.Background(), "upgrade-sessions", "rolebindings", "us-s-1"); !errors.Is(err, ErrForbiddenWrite) {
+		t.Fatalf("RoleBinding delete: %v", err)
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Fatalf("saw %d calls", n)
+	}
+}
+
+// A delete reads the object first and refuses one the console did not make;
+// the delete it does send is pinned to the uid it checked.
+func TestDeleteNeedsTheManagedByLabel(t *testing.T) {
+	var deletes []string
+	c, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/us-planted"):
+			_, _ = w.Write([]byte(`{"metadata":{"name":"us-planted","uid":"u1","labels":{"app":"x"}}}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/us-ours"):
+			_, _ = w.Write([]byte(`{"metadata":{"name":"us-ours","uid":"u2","labels":{"app.kubernetes.io/managed-by":"cluster-update-fr"}}}`))
+		case r.Method == http.MethodDelete:
+			b, _ := io.ReadAll(r.Body)
+			deletes = append(deletes, r.URL.Path+" "+string(b))
+		default:
+			w.WriteHeader(404)
+		}
+	})
+	c.Writes = &WritePolicy{SessionNamespace: "upgrade-sessions"}
+	ctx := context.Background()
+	if err := c.Delete(ctx, "upgrade-sessions", "secrets", "us-planted"); !errors.Is(err, ErrForbiddenWrite) {
+		t.Errorf("unlabelled delete: %v", err)
+	}
+	if err := c.Delete(ctx, "upgrade-sessions", "secrets", "us-ours"); err != nil {
+		t.Errorf("labelled delete: %v", err)
+	}
+	if len(deletes) != 1 || !strings.Contains(deletes[0], "/us-ours") || !strings.Contains(deletes[0], `"uid":"u2"`) {
+		t.Errorf("deletes = %v", deletes)
 	}
 }
 
@@ -140,17 +201,17 @@ func TestCreateConflictAndDeleteNotFound(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 409, "reason": "AlreadyExists", "message": "exists"})
-		case http.MethodDelete:
+		case http.MethodGet, http.MethodDelete:
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 404, "reason": "NotFound"})
 		}
 	})
 	c.Writes = &WritePolicy{SessionNamespace: "upgrade-sessions"}
-	err := c.Create(context.Background(), "upgrade-sessions", "pods", map[string]any{"metadata": map[string]any{"name": "p"}})
+	err := c.Create(context.Background(), "upgrade-sessions", "pods", map[string]any{"metadata": map[string]any{"name": "us-p", "labels": map[string]any{ManagedByLabel: ManagedBy}}})
 	if !IsConflict(err) {
 		t.Errorf("want conflict, got %v", err)
 	}
-	if err := c.Delete(context.Background(), "upgrade-sessions", "pods", "p"); !IsNotFound(err) {
+	if err := c.Delete(context.Background(), "upgrade-sessions", "pods", "us-p"); !IsNotFound(err) {
 		t.Errorf("want not found, got %v", err)
 	}
 }
