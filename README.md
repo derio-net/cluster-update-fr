@@ -29,10 +29,14 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 
 | What | Value |
 |---|---|
-| Image | `ghcr.io/derio-net/cluster-update-fr:<semver>` (published on `v*` tags) |
+| Image | `ghcr.io/derio-net/cluster-update-fr:<semver>` (published on `v*` tags; the release notes carry the pushed `@sha256:` digest — pin by digest) |
 | Metrics | `cluster_update_versions_behind{cluster,component}`, `cluster_update_vulns_open{cluster,severity}`, `cluster_update_last_report_timestamp_seconds`, `cluster_update_last_scan_timestamp_seconds`, `cluster_update_updates{state}`, `cluster_update_alarms{state}`, plus `cluster_update_telegram_configured` |
 | Session pods | namespace `upgrade-sessions`, labels `fr.run/id=<upgrade-id>`, `cluster-update.fr/type=<chart-major\|stateful\|rollouts\|frank-os\|hop-os>`, ServiceAccount `upgrade-session-<type>` (not for `hop-os`) |
-| Session credentials | files under `SESSION_SECRET_DIR`: `github-token`, `omni-sa-key`, `talosconfig`, `hop-talosconfig`, `hop-kubeconfig` (each type gets only its own) |
+| Session objects | pod `us-<id>-<hash>`, Secrets `…-creds` / `…-brief`, all labelled `app.kubernetes.io/managed-by=cluster-update-fr`; the console writes no RoleBinding — frank pre-binds every role a session needs |
+| Session credentials | files under `SESSION_SECRET_DIR`: `github-token` (the **session** App's token, not the console's), `omni-sa-key`, `talosconfig`, `hop-talosconfig`, `hop-kubeconfig` (each type gets only its own) |
+| Session PRs | branch `cluster-update/session-<upgrade-id>-<topic>`, author `SESSION_BOT_LOGIN`; merged only by the console on the operator's click |
+| Revert PRs | branch `cluster-update/revert-<reverted PR>-<time>`, author `CONSOLE_BOT_LOGIN`; merged only by the console on the operator's click |
+| Required CI | `required_ci_contexts:` in frank's `update-policy.yaml` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` or the console bot |
 | Briefs | read from frank: `docs/upgrade-briefs/<type>.md`, `docs/upgrade-briefs/AGENTS.md` |
 | Hop scan results | VictoriaLogs lines `hop-scan result {"image","namespace","vulnerabilities":[{"id","severity","pkg","installed","fixed","title"}]}` |
 | Omni version | JSON file (`OMNI_STATUS_FILE`) `{"version": "..."}` or `omnictl get sysversion -o json` output, written by a Reader-SA sidecar |
@@ -43,7 +47,19 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 |---|---|---|---|
 | `LISTEN` | `:8080` | pages and actions (verified identity required) | Traefik only |
 | `OPS_LISTEN` | `:9090` | `/healthz`, `/metrics` — no pages, no actions | kubelet probes, VictoriaMetrics |
-| `SESSION_API_LISTEN` | `:8081` | `POST /api/sessions/{id}/step`, `/finish` (session step token) | upgrade-session pods |
+| `SESSION_API_LISTEN` | `:8081` | `POST /api/sessions/{id}/step`, `/finish`, `/request-merge` (session step token) | upgrade-session pods |
+
+### Session API
+
+All calls carry `Authorization: Bearer <session-step-token>` (from the
+session's own creds Secret). Every field is capped and redacted under a time
+bound before it is stored or shown.
+
+| Call | Body | Effect |
+|---|---|---|
+| `POST …/step` | `{"state":"start\|finish","name":"…"}` (name ≤ 256 B) | pauses / restarts the idle clock; a repeated `start` does not restart the step clock |
+| `POST …/request-merge` | `{"pr": N}` | the console verifies PR N against this session's scope and lists it for the operator's **Merge session PR**; `422` names why it was refused |
+| `POST …/finish` | `{"outcome":"…","transcript":"…"}` (outcome ≤ 4 KiB, transcript ≤ 1 MiB) | ends the session; the scrubbed transcript goes to History |
 
 ### Deployment shape
 
@@ -52,9 +68,11 @@ The console is a **single writer**: `replicas: 1`, Deployment
 exclusive `flock` on `STATE_DIR/state.lock` and exits if another process holds
 it, so a RollingUpdate overlap or a second replica fails loudly instead of
 racing the state file. Session starts write the target lock and the session
-record (with its step-token hash) to disk *before* the pod is created; a pod
-found without a record is adopted only if its own creds Secret yields the
-token, otherwise it is ended.
+record (with its step-token hash) to disk *before* the pod is created, then
+record the pod's and Secrets' UIDs. An attach proves the live pod is that
+pod (UID, labels, image, ServiceAccount, mounts, no ephemeral containers,
+Secret UIDs); anything else is never attached — it is deleted if the console
+made it, otherwise refused — and alarmed in `#security`.
 
 ## Configuration
 
@@ -64,7 +82,9 @@ Every credential is optional; a missing one disables only what needs it.
 |---|---|
 | `GITHUB_TOKEN_FILE` / `GITHUB_TOKEN` | console GitHub App installation token (re-read on use) |
 | `GITEA_URL`, `GITEA_REPO`, `GITEA_TOKEN_FILE` | Gitea mirror for CI diagnosis |
-| `RENOVATE_BOT_LOGIN`, `CONSOLE_BOT_LOGIN`, `TRUSTED_COMMITTERS` (default `web-flow`) | PR trust: only PRs by these bots are acted on (unset = none) |
+| `RENOVATE_BOT_LOGIN`, `CONSOLE_BOT_LOGIN`, `SESSION_BOT_LOGIN`, `TRUSTED_COMMITTERS` (default `web-flow`) | PR trust: only PRs by these bots are acted on (unset = none) |
+| `STATUS_CREATOR_LOGINS` | GitHub login(s) of the Gitea→GitHub status bridge; only their (and the console's) statuses count as CI — unset = nothing passes |
+| `FRANK_REF` (`main`) | the only base branch an update PR may target |
 | `AUTHENTIK_JWKS_URL`, `AUTHENTIK_ISSUER`, `AUTHENTIK_AUDIENCE`, `OPERATOR_GROUP` | JWT identity mode (preferred) |
 | `PROXY_SECRET_FILE`, `OPERATOR_GROUP` | proxy shared-secret identity mode (fallback) |
 | `FRANK_UPDATER_TELEGRAM_BOT_TOKEN`, `_CHAT_ID`, `_SECURITY_THREAD_ID` | the derio.net group's `#security` topic |
@@ -73,25 +93,44 @@ Every credential is optional; a missing one disables only what needs it.
 | `OMNI_STATUS_FILE` | running Omni version |
 | `SESSION_IMAGE`, `SESSION_SECRET_DIR`, `SESSION_API_URL`, `RUNS_FR_URL` | sessions |
 | `STATE_DIR` | state file (PVC) |
-| `SCAN_INTERVAL` (5m), `CI_TIMEOUT` (30m), `SESSION_IDLE_TIMEOUT` (2h), `SESSION_MAX_LIFETIME` (8h), `REPORT_HOUR` (8, UTC) | timings |
+| `SCAN_INTERVAL` (5m), `CI_TIMEOUT` (30m, from the head's push), `REPORT_HOUR` (8, UTC) | timings |
+| `SESSION_IDLE_TIMEOUT` (2h), `SESSION_MAX_LIFETIME` (8h), `SESSION_HARD_CEILING` (2× max lifetime), `SESSION_STEP_CAP` (4h), `SESSION_STEP_TOTAL_CAP` (= max lifetime), `SESSION_MAX_STEP_STARTS` (50) | session lifecycle |
+| `SESSION_TRANSCRIPT_MAX` (1 MiB), `SESSION_OUTCOME_MAX` (4 KiB), `SESSION_TRANSCRIPT_SCRUB_TIMEOUT` (10s) | session API caps |
 
 ## Security model
 
 - **PR trust** (the frank repo is public): a PR is acted on only if its author
-  is the Renovate bot (batch PRs: the console's bot), its head is in the repo
-  on `renovate/` or `cluster-update/batch-`, every commit is GitHub-signature
-  verified and authored by the bot's account, and every changed file lies in
-  the dependency's own location (sensitive paths only for that dependency on
-  the session path). Merges re-verify and pin the head SHA.
+  is the right bot for its branch — Renovate on `renovate/`, the console on
+  `cluster-update/batch-` and `cluster-update/revert-<n>-`, the session App on
+  `cluster-update/session-<its id>-` — its head is in the repo, its base is
+  `main`, every commit is GitHub-signature verified, authored by that bot's
+  account and pushed by it, and every changed file lies in the dependency's
+  own location. Sensitive paths (`.github/`, `scripts/`, `apps/root/`,
+  Hop's `clusters/hop/apps/root/` and updater apps, the policy files) only for
+  that dependency on the session path — except an app's own root template,
+  which any path may change on its `targetRevision` line alone. Every merge
+  re-verifies and is pinned to the verified head SHA (batch members are
+  merged into the batch branch by SHA too).
+- **CI signal**: every declared required context must be `success` (a Gitea
+  skipped/warning forwarded as success does not count), posted by the bridge
+  or the console; after the one retry only newer results count.
 - **Identity**: the UI verifies Authentik's signed JWT (or a proxy shared
   secret), requires the operator group, strips client identity headers, and
-  fails closed when neither is configured.
-- **Cluster writes**: the kube client can only create/delete pods, Secrets
-  and RoleBindings in the session namespace; everything else is refused
-  before a request is built.
+  fails closed when neither is configured. Every state change is a
+  CSRF-checked POST (attach included); CSP `form-action 'self'`.
+- **Cluster writes**: the kube client can only create/delete pods and Secrets
+  in the session namespace, named `us-…`, labelled managed-by; a delete reads
+  the object first and refuses one the console did not make. No RoleBinding.
+- **Sessions**: idle timeout, maximum lifetime, and a hard ceiling plus
+  per-step / total-step / step-count caps that end a session even mid-step and
+  alarm `#security` (routine lifetime warnings stay in the console). A pod
+  that fails verification on any cycle is ended.
 - **Credentials**: two redaction layers — exact values of every credential
-  the console holds or injects (with encoded forms), then patterns — over
-  logs, pages, Telegram, PR bodies and transcripts.
+  the console holds or injects (every file under `SESSION_SECRET_DIR`
+  registered at start and each cycle), then patterns — over logs, pages,
+  Telegram, PR bodies, session fields and transcripts.
+- **Supply chain**: Actions pinned by commit SHA, bases by digest, image with
+  provenance + SBOM, least-privilege release jobs.
 
 ## Development
 
