@@ -337,6 +337,20 @@ func TestReconcileOrphans(t *testing.T) {
 	}
 }
 
+// c1d-r8: a write never replaces undecodable session records with {}.
+func TestUpdateNeverOverwritesUnreadableRecords(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := launcher(t, newFake(), &now)
+	bad := json.RawMessage(`{"pr-1": 7}`)
+	_ = l.Store.UpdateBlob(sessionBlob, func(json.RawMessage) (json.RawMessage, error) { return bad, nil })
+	if err := l.update(func(m map[string]Record) error { m["x"] = Record{ID: "x"}; return nil }); err == nil {
+		t.Fatal("update over unreadable records succeeded")
+	}
+	if raw, _ := l.Store.RawBlob(sessionBlob); string(raw) != string(bad) {
+		t.Fatalf("records overwritten: %s", raw)
+	}
+}
+
 // sec2-10: unreadable session records make nothing an orphan.
 func TestOrphansNotReapedWhenRecordsAreUnreadable(t *testing.T) {
 	now := time.Unix(0, 0)

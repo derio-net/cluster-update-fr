@@ -185,7 +185,11 @@ func (l *Launcher) update(fn func(m map[string]Record) error) error {
 	return l.Store.UpdateBlob(sessionBlob, func(cur json.RawMessage) (json.RawMessage, error) {
 		m := map[string]Record{}
 		if len(cur) > 0 {
-			_ = json.Unmarshal(cur, &m)
+			if err := json.Unmarshal(cur, &m); err != nil {
+				// Never overwrite unreadable session records with {} (c1d-r8):
+				// that would forget every running session and its token.
+				return nil, fmt.Errorf("session: records unreadable: %w", err)
+			}
 		}
 		if err := fn(m); err != nil {
 			return nil, err
