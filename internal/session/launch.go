@@ -377,7 +377,7 @@ func (l *Launcher) createOwned(ctx context.Context, id, res, name string, conten
 	}
 	if !ours {
 		msg := fmt.Sprintf("session %s: %s/%s exists and is not this session's; start refused", id, res, name)
-		l.alarm(id+"|foreign-"+res+"|"+name, msg)
+		l.alarm(alarmKey(id, "foreign-"+res, live.Metadata.UID, name), msg)
 		l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", Reason: msg})
 		return false, fmt.Errorf("%w: %s/%s", ErrForeignObject, res, name)
 	}
@@ -493,7 +493,14 @@ func (l *Launcher) refuseUnknown(ctx context.Context, id, target, pod string, li
 	Locks{Store: l.Store}.Release(target, id)
 	_ = l.Store.Save()
 	msg := fmt.Sprintf("session %s: pod %s is not the console's own (%s); %s", id, pod, why, action)
-	l.alarm(id+"|foreign-pod|"+strings.SplitN(action, ":", 2)[0], msg)
+	// Keyed on the incident's identity — this object's UID and the reason —
+	// so only the exact same stuck state is suppressed; a different planted
+	// pod for the same id alarms again.
+	key := alarmKey(id, "foreign-pod", live.Metadata.UID, why+"|"+strings.SplitN(action, ":", 2)[0])
+	l.alarm(key, msg)
+	if action == "deleted with its Secrets" {
+		l.resolveAlarm(key) // resolved: the next incident under this name is new
+	}
 	l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", By: "launcher", Reason: msg})
 	return fmt.Errorf("%w: %s", ErrForeignObject, msg)
 }
@@ -521,6 +528,20 @@ func (l *Launcher) alarm(key, msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.alarms = append(l.alarms, scrub.String(msg))
+}
+
+// alarmKey names one incident: (subject, object UID, reason) — never a broad
+// category. The reason is hashed so keys stay short.
+func alarmKey(subject, kind, uid, reason string) string {
+	sum := sha256.Sum256([]byte(reason))
+	return subject + "|" + kind + "|" + uid + "|" + hex.EncodeToString(sum[:8])
+}
+
+func (l *Launcher) resolveAlarm(key string) {
+	_ = store.UpdateJSON(l.Store, alarmKeysBlob, func(m *map[string]bool) error {
+		delete(*m, key)
+		return nil
+	})
 }
 
 func (l *Launcher) clearAlarmKeys(id string) {

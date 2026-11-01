@@ -199,7 +199,13 @@ func (l *Launcher) endAlarm(ctx context.Context, r Record, kind, outcome string)
 		e.Outcome += " — CLEANUP INCOMPLETE: " + scrub.String(err.Error())
 		state = "incomplete"
 	}
-	l.alarm(r.ID+"|"+kind+"|"+state, "session "+r.ID+" "+e.Outcome)
+	key := alarmKey(r.ID, kind, r.PodUID, state)
+	l.alarm(key, "session "+r.ID+" "+e.Outcome)
+	if state == "done" {
+		// Resolved: drop the stuck-state key (if any) so a new incident on
+		// a later session with this id alarms afresh.
+		l.resolveAlarm(alarmKey(r.ID, kind, r.PodUID, "incomplete"))
+	}
 	return e
 }
 

@@ -279,6 +279,29 @@ func TestUnrecordedPodWithoutTokenIsNotAttached(t *testing.T) {
 	}
 }
 
+// Alarm de-dup is per incident: the same stuck planted pod alarms once over
+// repeated starts; a different planted pod for the same id alarms again.
+func TestForeignPodAlarmsOncePerIncident(t *testing.T) {
+	now := time.Unix(1000, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	plant := func(uid string) {
+		k.objects["pods/"+PodName("pr-9")] = map[string]any{"metadata": map[string]any{"name": PodName("pr-9"), "uid": uid}}
+	}
+	plant("uid-planted-1")
+	for i := 0; i < 3; i++ {
+		_, _, _ = l.Start(context.Background(), req("pr-9", TypeChartMajor, "grafana"))
+	}
+	if a := l.Alarms(); len(a) != 1 {
+		t.Fatalf("same stuck pod over 3 starts: %d alarms %v", len(a), a)
+	}
+	plant("uid-planted-2")
+	_, _, _ = l.Start(context.Background(), req("pr-9", TypeChartMajor, "grafana"))
+	if a := l.Alarms(); len(a) != 1 {
+		t.Fatalf("a second, different planted pod must alarm again: %v", a)
+	}
+}
+
 // Attach proves identity: the live pod must have the UID recorded at
 // create time, our labels, the recorded image/ServiceAccount/Secret mounts,
 // and the Secrets their recorded UIDs. Any mismatch: never attached, the
