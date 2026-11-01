@@ -452,16 +452,18 @@ func (g *GitHub) PRFiles(ctx context.Context, n int) ([]string, error) {
 
 // Push is the most recent push to a branch.
 type Push struct {
-	After string // the SHA the ref moved to
-	Actor string // GitHub account that pushed
+	After string    // the SHA the ref moved to
+	Actor string    // GitHub account that pushed
+	At    time.Time // when GitHub recorded the push
 }
 
 // LastPush returns the newest push (or force push) to branch, from the
 // repository activity API — GitHub's own record of who moved the ref.
 func (g *GitHub) LastPush(ctx context.Context, branch string) (Push, error) {
 	var raw []struct {
-		After        string `json:"after"`
-		ActivityType string `json:"activity_type"`
+		After        string    `json:"after"`
+		ActivityType string    `json:"activity_type"`
+		Timestamp    time.Time `json:"timestamp"`
 		Actor        *struct {
 			Login string `json:"login"`
 		} `json:"actor"`
@@ -473,7 +475,7 @@ func (g *GitHub) LastPush(ctx context.Context, branch string) (Push, error) {
 	if len(raw) == 0 {
 		return Push{}, ErrNotFound
 	}
-	p := Push{After: raw[0].After}
+	p := Push{After: raw[0].After, At: raw[0].Timestamp}
 	if raw[0].Actor != nil {
 		p.Actor = raw[0].Actor.Login
 	}

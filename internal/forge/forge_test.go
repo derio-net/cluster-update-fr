@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type call struct {
@@ -313,10 +314,10 @@ func TestPRProvenance(t *testing.T) {
 
 func TestLastPush(t *testing.T) {
 	srv, calls := fake(t, map[string]string{
-		"GET /repos/derio-net/frank/activity": `[{"after":"abc","activity_type":"push","actor":{"login":"renovate-frank[bot]"}}]`,
+		"GET /repos/derio-net/frank/activity": `[{"after":"abc","activity_type":"push","timestamp":"2026-10-31T09:30:00Z","actor":{"login":"renovate-frank[bot]"}}]`,
 	})
 	p, err := gh(srv, "t").LastPush(context.Background(), "renovate/x")
-	if err != nil || p.After != "abc" || p.Actor != "renovate-frank[bot]" {
+	if err != nil || p.After != "abc" || p.Actor != "renovate-frank[bot]" || !p.At.Equal(time.Date(2026, 10, 31, 9, 30, 0, 0, time.UTC)) {
 		t.Fatalf("LastPush = %+v %v", p, err)
 	}
 	if !strings.Contains((*calls)[0].Query, "ref=refs%2Fheads%2Frenovate%2Fx") {

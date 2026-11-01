@@ -179,6 +179,25 @@ func (a *App) trustConfig() trust.Config {
 		BaseBranch: a.Cfg.FrankRef}
 }
 
+// headPushedAt is when the PR's CURRENT head was pushed (the repository
+// activity API), which is when CI should start — not the PR's updated_at,
+// which any comment or label moves (c1c-r9). Unreadable, or a record for
+// another SHA: the PR's creation time, which errs toward "held — CI",
+// never toward waiting forever.
+func (a *App) headPushedAt(ctx context.Context, p forge.PR, cache map[string]time.Time) time.Time {
+	if t, ok := cache[p.HeadSHA]; ok {
+		return t
+	}
+	at := p.CreatedAt
+	if a.GitHub != nil {
+		if push, err := a.GitHub.LastPush(ctx, p.HeadRef); err == nil && push.After == p.HeadSHA && !push.At.IsZero() {
+			at = push.At
+		}
+	}
+	cache[p.HeadSHA] = at
+	return at
+}
+
 // ciRequirement: the contexts frank's update-policy.yaml declares as
 // required (default: every bridge context), posted only by the status
 // bridge (STATUS_CREATOR_LOGINS) or the console itself (re-forwards).
@@ -346,6 +365,7 @@ func (a *App) Cycle(ctx context.Context) View {
 	e.Inventory = func() *inventory.Inventory { return inv }
 
 	statuses := map[string][]forge.Status{}
+	pushes := map[string]time.Time{}
 	verdict := func(p forge.PR) (cidiag.Verdict, string) {
 		st, ok := statuses[p.HeadSHA]
 		if !ok && a.GitHub != nil {
@@ -360,7 +380,7 @@ func (a *App) Cycle(ctx context.Context) View {
 			id = engine.BatchID(p.Number)
 		}
 		req.Since = a.Store.RetriedAt(id) // after a retry, only newer results count
-		return cidiag.Evaluate(st, p.UpdatedAt, now, a.Cfg.CITimeout, req)
+		return cidiag.Evaluate(st, a.headPushedAt(ctx, p, pushes), now, a.Cfg.CITimeout, req)
 	}
 	trustCache := map[string]error{}
 	items, untrusted := a.trusted(ctx, e.Build(prs, verdict), trustCache)

@@ -45,6 +45,10 @@ type fakeGitHub struct {
 	commits map[int][]forge.Commit
 	files   map[int][]string
 	moveTo  string // when set, the PR's head moves right after it is listed
+	// pushedAt overrides when the head was pushed (default: CreatedAt);
+	// noCI lists head SHAs with no statuses at all.
+	pushedAt map[int]time.Time
+	noCI     map[string]bool
 }
 
 const renovateBot = "renovate-frank[bot]"
@@ -76,7 +80,11 @@ func (g *fakeGitHub) LastPush(_ context.Context, branch string) (forge.Push, err
 			if c, ok := g.commits[p.Number]; ok && len(c) > 0 {
 				actor = c[len(c)-1].Author
 			}
-			return forge.Push{After: p.HeadSHA, Actor: actor}, nil
+			at := p.CreatedAt
+			if t, ok := g.pushedAt[p.Number]; ok {
+				at = t
+			}
+			return forge.Push{After: p.HeadSHA, Actor: actor, At: at}, nil
 		}
 	}
 	return forge.Push{}, forge.ErrNotFound
@@ -128,7 +136,10 @@ func (g *fakeGitHub) PR(_ context.Context, n int) (forge.PR, error) {
 	}
 	return forge.PR{Number: n}, nil
 }
-func (g *fakeGitHub) Statuses(context.Context, string) ([]forge.Status, error) {
+func (g *fakeGitHub) Statuses(_ context.Context, sha string) ([]forge.Status, error) {
+	if g.noCI[sha] {
+		return nil, nil
+	}
 	s := forge.Status{Context: "gitea-actions/ci / go", State: "success", CreatedAt: t0}
 	s.Creator.Login = "status-bridge[bot]"
 	return []forge.Status{s}, nil
@@ -341,6 +352,23 @@ func TestStartSessionTwiceAttaches(t *testing.T) {
 	}
 	if len(k.objs) != 0 {
 		t.Errorf("leftovers: %v", k.objs)
+	}
+}
+
+// c1c-r9: the CI timeout runs from when the head was PUSHED. A comment or a
+// label bumps the PR's updated_at, and keying on it let a PR with no CI sit
+// "pending" forever instead of becoming held — CI.
+func TestCITimeoutRunsFromThePush(t *testing.T) {
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	gh.prs[0].UpdatedAt = t0.Add(-time.Minute) // someone just commented
+	gh.pushedAt = map[int]time.Time{7: t0.Add(-3 * time.Hour)}
+	gh.noCI = map[string]bool{"h7": true}
+	v := a.Cycle(context.Background())
+	for _, it := range v.Items {
+		if it.ID == "pr-7" && it.CI != "missing" {
+			t.Fatalf("pr-7 CI = %s (%s): the 30m timeout must run from the push 3h ago", it.CI, it.CIDetail)
+		}
 	}
 }
 
