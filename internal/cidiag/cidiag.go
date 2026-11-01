@@ -56,6 +56,9 @@ var DefaultRequired = []string{BridgePrefix + "*"}
 type Requirement struct {
 	Contexts []string
 	Creators []string
+	// Excluded logins never count, even when listed in Creators (c1d-r12):
+	// the console's own bot, so the console cannot satisfy its own CI gate.
+	Excluded []string
 	// Since, when set (the time of the update's one CI retry), discards
 	// every status created at or before it and measures the timeout from it
 	// (c1c-r11): the failure a retry acted on cannot fail the update again.
@@ -83,12 +86,18 @@ func Evaluate(statuses []forge.Status, headAt, now time.Time, timeout time.Durat
 		}
 		return Pending, detail
 	}
-	if len(req.Creators) == 0 {
-		return wait("no trusted status creator configured (STATUS_CREATOR_LOGINS)")
+	excluded := map[string]bool{}
+	for _, c := range req.Excluded {
+		excluded[c] = true
 	}
 	creators := map[string]bool{}
 	for _, c := range req.Creators {
-		creators[c] = true
+		if c != "" && !excluded[c] {
+			creators[c] = true
+		}
+	}
+	if len(creators) == 0 {
+		return wait("no trusted status creator configured (STATUS_CREATOR_LOGINS)")
 	}
 	var trusted []forge.Status
 	for _, s := range statuses {

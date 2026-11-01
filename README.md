@@ -36,7 +36,7 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 | Session credentials | files under `SESSION_SECRET_DIR`: `github-token` (the **session** App's token, not the console's), `omni-sa-key`, `talosconfig`, `hop-talosconfig`, `hop-kubeconfig` (each type gets only its own) |
 | Session PRs | branch `cluster-update/session-<upgrade-id>/<topic>` (`/` cannot occur in an id, so prefixes never collide; the branch names the owning session), author `SESSION_BOT_LOGIN`; merged only by the console on the operator's click |
 | Revert PRs | branch `cluster-update/revert-<reverted PR>-<time>`, author `CONSOLE_BOT_LOGIN`; files restored to the merge's parent only if unchanged since the merge (else revert by hand); merged only by the console on the operator's click |
-| Required CI | `required_ci_contexts:` in frank's `update-policy.yaml` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` or the console bot |
+| Required CI | `required_ci_contexts:` in frank's `update-policy.yaml` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` only — never by `CONSOLE_BOT_LOGIN`, even if listed; unset = nothing passes |
 | Briefs | read from frank: `docs/upgrade-briefs/<type>.md`, `docs/upgrade-briefs/AGENTS.md` |
 | Hop scan results | VictoriaLogs lines `hop-scan result {"image","namespace","vulnerabilities":[{"id","severity","pkg","installed","fixed","title"}]}` |
 | Omni version | JSON file (`OMNI_STATUS_FILE`) `{"version": "..."}` or `omnictl get sysversion -o json` output, written by a Reader-SA sidecar |
@@ -83,7 +83,7 @@ Every credential is optional; a missing one disables only what needs it.
 | `GITHUB_TOKEN_FILE` / `GITHUB_TOKEN` | console GitHub App installation token (re-read on use) |
 | `GITEA_URL`, `GITEA_REPO`, `GITEA_TOKEN_FILE` | Gitea mirror for CI diagnosis |
 | `RENOVATE_BOT_LOGIN`, `CONSOLE_BOT_LOGIN`, `SESSION_BOT_LOGIN`, `TRUSTED_COMMITTERS` (default `web-flow`) | PR trust: only PRs by these bots are acted on (unset = none) |
-| `STATUS_CREATOR_LOGINS` | GitHub login(s) of the Gitea→GitHub status bridge; only their (and the console's) statuses count as CI — unset = nothing passes |
+| `STATUS_CREATOR_LOGINS` | GitHub login(s) of the Gitea→GitHub status bridge; only their statuses count as CI (the console's own never do) — unset = nothing passes |
 | `FRANK_REF` (`main`) | the only base branch an update PR may target |
 | `AUTHENTIK_JWKS_URL`, `AUTHENTIK_ISSUER`, `AUTHENTIK_AUDIENCE`, `OPERATOR_GROUP` | JWT identity mode (preferred) |
 | `PROXY_SECRET_FILE`, `OPERATOR_GROUP` | proxy shared-secret identity mode (fallback) |
@@ -117,8 +117,10 @@ Every credential is optional; a missing one disables only what needs it.
   re-verifies and is pinned to the verified head SHA (batch members are
   merged into the batch branch by SHA too).
 - **CI signal**: every declared required context must be `success` (a Gitea
-  skipped/warning forwarded as success does not count), posted by the bridge
-  or the console; after the one retry only newer results count.
+  skipped/warning forwarded as success does not count), posted by the bridge;
+  statuses created by the console's own bot never count, so the console
+  cannot satisfy its own CI gate (c1d-r12). After the one retry only newer
+  results count.
 - **Identity**: the UI verifies Authentik's signed JWT (or a proxy shared
   secret), requires the operator group, strips client identity headers, and
   fails closed when neither is configured. Every state change is a

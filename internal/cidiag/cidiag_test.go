@@ -25,7 +25,10 @@ var anyBridge = Requirement{Creators: []string{bridge}}
 // trusted creator; skipped/warning forwarded as success is not a pass.
 func TestEvaluateRequiredContexts(t *testing.T) {
 	timeout := 30 * time.Minute
-	req := Requirement{Contexts: []string{"gitea-actions/ci / go (push)", "gitea-actions/ci / image (push)"}, Creators: []string{bridge, "cluster-update-fr[bot]"}}
+	// c1d-r12: the console bot is excluded even if it is (mis)listed as a
+	// creator — the console never satisfies its own CI gate.
+	req := Requirement{Contexts: []string{"gitea-actions/ci / go (push)", "gitea-actions/ci / image (push)"}, Creators: []string{bridge, "cluster-update-fr[bot]"},
+		Excluded: []string{"cluster-update-fr[bot]"}}
 	forged := st("gitea-actions/ci / image (push)", "success", t0)
 	forged.Creator.Login = "mallory"
 	skipped := st("gitea-actions/ci / image (push)", "success", t0)
@@ -41,12 +44,22 @@ func TestEvaluateRequiredContexts(t *testing.T) {
 		{"both required green", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), st("gitea-actions/ci / image (push)", "success", t0)}, Passed},
 		{"a required context posted by an untrusted account does not count", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), forged}, Pending},
 		{"skipped is not success", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), skipped}, Missing},
-		{"the console's own re-forward counts", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), reforwarded}, Passed},
+		{"the console's own status never counts (c1d-r12)", []forge.Status{st("gitea-actions/ci / go (push)", "success", t0), reforwarded}, Pending},
 	}
 	for _, c := range cases {
 		if v, d := Evaluate(c.statuses, t0, t0.Add(time.Minute), timeout, req); v != c.want {
 			t.Errorf("%s: got %s (%s), want %s", c.name, v, d, c.want)
 		}
+	}
+	// Excluded alone (no creator configured): nothing passes, whoever posted.
+	only := Requirement{Excluded: []string{"cluster-update-fr[bot]"}}
+	if v, _ := Evaluate([]forge.Status{reforwarded, st("gitea-actions/ci / go (push)", "success", t0)}, t0, t0.Add(time.Minute), timeout, only); v == Passed {
+		t.Error("no STATUS_CREATOR_LOGINS, yet CI passed")
+	}
+	// Creators that are ALL excluded count as none configured.
+	self := Requirement{Creators: []string{"cluster-update-fr[bot]"}, Excluded: []string{"cluster-update-fr[bot]"}}
+	if v, _ := Evaluate([]forge.Status{reforwarded}, t0, t0.Add(time.Minute), timeout, self); v == Passed {
+		t.Error("the console satisfied its own CI gate")
 	}
 	if v, _ := Evaluate([]forge.Status{st("gitea-actions/ci / go", "success", t0)}, t0, t0.Add(time.Minute), timeout, Requirement{}); v == Passed {
 		t.Error("with no trusted creator configured nothing may pass")

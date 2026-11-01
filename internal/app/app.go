@@ -223,13 +223,16 @@ func (a *App) headPushedAt(ctx context.Context, p forge.PR, cache map[string]tim
 
 // ciRequirement: the contexts frank's update-policy.yaml declares as
 // required (default: every bridge context), posted only by the status
-// bridge (STATUS_CREATOR_LOGINS) or the console itself (re-forwards).
+// bridge (STATUS_CREATOR_LOGINS; unset = nothing passes). Statuses created by
+// the console's own bot never count (c1d-r12), even if it is listed: the
+// console must never satisfy its own CI gate (its re-forwards are only a
+// visible copy for the PR page).
 func (a *App) ciRequirement(p frankrepo.Policy) cidiag.Requirement {
-	creators := append([]string(nil), a.Cfg.StatusCreators...)
+	req := cidiag.Requirement{Contexts: p.RequiredCIContexts, Creators: append([]string(nil), a.Cfg.StatusCreators...)}
 	if a.Cfg.ConsoleBot != "" {
-		creators = append(creators, a.Cfg.ConsoleBot)
+		req.Excluded = []string{a.Cfg.ConsoleBot}
 	}
-	return cidiag.Requirement{Contexts: p.RequiredCIContexts, Creators: creators}
+	return req
 }
 
 // trusted keeps the items whose PR passes every trust condition, lists the

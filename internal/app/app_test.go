@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/derio-net/cluster-update-fr/internal/cidiag"
 	"github.com/derio-net/cluster-update-fr/internal/config"
 	"github.com/derio-net/cluster-update-fr/internal/engine"
 	"github.com/derio-net/cluster-update-fr/internal/forge"
@@ -25,6 +26,20 @@ import (
 )
 
 var t0 = time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+
+// c1d-r12: the console's own statuses never satisfy required CI, and an
+// unset STATUS_CREATOR_LOGINS means nothing passes.
+func TestConsoleNeverSatisfiesItsOwnCIGate(t *testing.T) {
+	own := forge.Status{Context: "gitea-actions/ci", State: "success", CreatedAt: t0}
+	own.Creator.Login = "cluster-update-fr[bot]"
+	for _, creators := range [][]string{nil, {"cluster-update-fr[bot]"}} {
+		a := &App{Cfg: &config.Config{ConsoleBot: "cluster-update-fr[bot]", StatusCreators: creators}}
+		req := a.ciRequirement(frankrepo.Policy{RequiredCIContexts: []string{"gitea-actions/ci"}})
+		if v, d := cidiag.Evaluate([]forge.Status{own}, t0, t0.Add(time.Minute), time.Hour, req); v == cidiag.Passed {
+			t.Errorf("creators %v: the console's own status passed CI (%s)", creators, d)
+		}
+	}
+}
 
 type fixtureGetter struct{}
 
