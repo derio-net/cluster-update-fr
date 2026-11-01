@@ -1,0 +1,43 @@
+# Fixture update policy.
+version: 1
+merge_window: 24h
+minimum_release_age: 72h
+# Where CI comes from (p4-r2): github-checks (required_ci_checks) or
+# gitea-statuses (required_ci_contexts). This fixture exercises the Gitea
+# path; the app tests swap in github-checks.
+ci_source: gitea-statuses
+# github-checks: (workflow file, check-run name) pairs (p4-r2b).
+required_ci_checks:
+  - workflow: .github/workflows/ci.yml
+    name: go
+# Every one of these must be green, posted by the status bridge, before
+# anything merges (c1s-r3).
+required_ci_contexts:
+  - "gitea-actions/ci / go"
+defaults:
+  patch: auto-merge
+  minor: batch-approve
+  major: session
+  digest: batch-approve
+rules:
+  - match: {app: paperclip-db}
+    path: session
+    reason: stateful — snapshot before merge
+  - match: {app: litellm}
+    path: session
+    reason: Argo Rollouts canary
+  - match: {dep: omni}
+    path: operator-runbook
+    reason: run from the laptop
+  - match: {dep: talos}
+    path: session
+    reason: OS step
+  - match: {dep: kubernetes}
+    path: session
+    reason: OS step
+  - match: {image: "ghcr.io/derio-net/*"}
+    path: batch-approve
+    reason: own images
+  - match: {chart: cilium}
+    path: session
+    reason: CNI minors

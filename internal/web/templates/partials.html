@@ -1,0 +1,54 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cluster updates</title>
+<style>
+:root{--bg:#fff;--fg:#1d2433;--muted:#5d6678;--line:#dde2ea;--card:#f6f8fb;--red:#b42318;--amber:#a15c07;--green:#067647;--blue:#1849a9}
+@media (prefers-color-scheme: dark){:root{--bg:#11151c;--fg:#e6e9ef;--muted:#9aa3b2;--line:#2a313c;--card:#171c25;--red:#f97066;--amber:#fdb022;--green:#47cd89;--blue:#84adff}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+header{display:flex;gap:1.5rem;align-items:center;padding:.8rem 1rem;border-bottom:1px solid var(--line);flex-wrap:wrap}
+header b{font-size:1.05rem}nav a{margin-right:1rem;color:var(--fg);text-decoration:none}nav a.on{border-bottom:2px solid var(--blue)}
+main{max-width:1100px;margin:0 auto;padding:1rem}h2{margin:1.6rem 0 .6rem;font-size:1.1rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.7rem .9rem;margin:.5rem 0}
+.card.security{border-left:4px solid var(--red)}.meta{color:var(--muted);font-size:.85rem}
+.rollback{font-size:.85rem;margin:.3rem 0}.warn{color:var(--amber);font-weight:600}.bad{color:var(--red);font-weight:600}.ok{color:var(--green)}
+form{display:inline}button{font:inherit;padding:.2rem .7rem;margin:.3rem .3rem 0 0;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);cursor:pointer}
+button.primary{background:var(--blue);border-color:var(--blue);color:#fff}button.danger{border-color:var(--red);color:var(--red)}
+table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{text-align:left;padding:.3rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
+.sev-critical{color:var(--red);font-weight:700}.sev-high{color:var(--amber);font-weight:600}
+.msg{background:var(--card);border:1px solid var(--blue);border-radius:6px;padding:.5rem .8rem}
+.empty{color:var(--muted);font-style:italic}code{font-size:.85em}
+@media (max-width:640px){main{padding:1rem 16px}table{display:block;overflow-x:auto}}
+</style>
+</head>
+<body>
+<header><b>Cluster updates</b>
+<nav><a href="/" {{if eq .Page "needs-action"}}class="on"{{end}}>Needs action</a><a href="/inventory" {{if eq .Page "inventory"}}class="on"{{end}}>Inventory</a><a href="/history" {{if eq .Page "history"}}class="on"{{end}}>History</a></nav>
+<span class="meta">signed in as {{.User}} · updated {{when .Built}}</span></header>
+<main>
+{{if .Msg}}<p class="msg">{{.Msg}}</p>{{end}}
+{{range .Warnings}}<p class="warn">⚠ {{.}}</p>{{end}}
+{{if .Errors}}<details class="card"><summary class="warn">{{len .Errors}} source(s) could not be read — affected rows show as unknown</summary><ul>{{range .Errors}}<li>{{.}}</li>{{end}}</ul></details>{{end}}
+{{end}}
+
+{{define "foot"}}</main></body></html>{{end}}
+
+{{define "btn"}}<form method="post" action="/act/{{.Action}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="{{.Class}}">{{.Label}}</button></form>{{end}}
+
+{{define "item"}}
+<div class="card{{if .Item.Security}} security{{end}}">
+<div><b>{{or .Item.PR.Title .Item.Name}}</b>{{if .Item.PR.Number}} <a class="meta" href="{{.Item.PR.URL}}">#{{.Item.PR.Number}}</a>{{end}}</div>
+<div class="meta">{{.Item.Name}} <code>{{.Item.From}}</code> → <code>{{.Item.To}}</code> · {{pathlabel .Item.Path}} · {{.Item.State}}{{if .Item.App}} · {{.Item.Cluster}}/{{.Item.App}}{{end}} · CI {{.Item.CI}}{{if .Item.CIDetail}} ({{.Item.CIDetail}}){{end}}</div>
+{{range .Item.Vulns}}<div class="meta"><span class="{{sevclass .Severity}}">{{.Severity}}</span> {{.ID}} {{.Package}}{{if .Fixed}} — fixed in {{.Fixed}}{{end}}</div>{{end}}
+{{if eq .Item.State "countdown"}}<div class="meta">⏱ merges at {{when .Item.MergeAt}} if CI has passed</div>{{end}}
+<div class="rollback"><b>Rollback:</b> {{.Item.Rollback}}</div>
+{{if eq .Item.State "held"}}{{template "btn" (btn "unhold" .Item.ID .CSRF "Release hold" "")}}{{else}}
+{{if .Item.CanApproveNow}}{{if .Item.Security}}{{template "btn" (btn "approve-now" .Item.ID .CSRF "Approve now" "primary")}}{{else if eq .Item.Path "auto-merge"}}{{template "btn" (btn "merge-now" .Item.ID .CSRF "Merge now" "primary")}}{{else}}{{template "btn" (btn "approve-now" .Item.ID .CSRF "Approve now" "")}}{{end}}{{template "btn" (btn "hold" .Item.ID .CSRF "Hold" "")}}{{end}}
+{{if .Item.NeedsSession}}{{template "btn" (btn "start-session" .Item.ID .CSRF "Start session" "primary")}}{{end}}
+{{if eq .Item.State "held-ci"}}{{template "btn" (btn "retry-ci" .Item.ID .CSRF "Retry CI" "")}}{{end}}
+{{if eq .Item.State "failed-ci"}}<span class="bad">failed — CI: retried once, needs you</span>{{end}}
+{{end}}
+</div>
+{{end}}

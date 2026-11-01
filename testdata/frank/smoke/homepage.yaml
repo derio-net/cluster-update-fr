@@ -1,0 +1,7 @@
+app: homepage
+cluster: frank
+checks:
+  - kind: http
+    target: http://homepage.homepage.svc.cluster.local:3000/
+    expect:
+      status: 200

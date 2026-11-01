@@ -1,0 +1,6 @@
+schema_version: 2
+plan: 2026-10-31--life--cluster-update-console
+spec: derio-net/frank:docs/superpowers/specs/2026-10-31--life--update-security-lifecycle-design.md
+target_repo: derio-net/cluster-update-fr
+fr_version: '>=4.20.0,<7.0.0'
+created: '2026-10-31'

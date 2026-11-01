@@ -1,0 +1,116 @@
+schema_version: 2
+phase:
+  number: 1
+  title: Skeleton, scrubbing and the inventory (R1, R25)
+  tag: agentic
+  depends_on: []
+  tracking_issue: null
+  skeleton: true
+  tier: standard
+  files:
+  - go.mod
+  - go.sum
+  - Makefile
+  - Dockerfile
+  - .dockerignore
+  - .github/workflows/**
+  - cmd/cluster-update-fr/**
+  - internal/config/**
+  - internal/scrub/**
+  - internal/version/**
+  - internal/frankrepo/**
+  - internal/kube/**
+  - internal/live/**
+  - internal/inventory/**
+  - testdata/**
+  - docs/superpowers/plans/**
+  estimate_lines: 1700
+tasks:
+- number: 1
+  title: Smoke — a trivial test goes green in CI
+  steps:
+  - id: P1.T1.S1
+    text: |-
+      Create go.mod (`module github.com/derio-net/cluster-update-fr`, `go 1.23.0`), internal/config/config_test.go asserting `config.Load(func(string) string { return "" })` returns Listen ":8080" and every optional credential empty without error (R: the app degrades, never crashes). Run `go test ./internal/config/`: FAILS (no package). Implement config.Load (env getter injected; *_FILE variants read a file; FRANK_UPDATER_TELEGRAM_BOT_TOKEN/_CHAT_ID/_SECURITY_THREAD_ID, GITHUB_TOKEN_FILE, GITEA_TOKEN_FILE, HOP_KUBECONFIG, STATE_DIR, FRANK_REPO, GITEA_URL, AUTH_HEADER default X-authentik-username). Re-run: ok.
+  - id: P1.T1.S2
+    text: |-
+      Add cmd/cluster-update-fr/main.go serving /healthz (200 "ok"), Makefile (test = `go test ./... -race`, vet), Dockerfile (golang build stage, distroless static nonroot, USER 65532), .github/workflows/ci.yml (push main + pull_request: setup-go from go.mod, `go vet ./...`, `go test ./... -race`, docker build without push) and .github/workflows/release.yml (tags v*: docker/metadata-action with `type=semver,pattern={{version}}` so the image is ghcr.io/derio-net/cluster-update-fr:<semver>, plus type=ref and type=sha). The workflows live ONLY in .github/workflows/ (Gitea reads both paths, GitHub reads only this one). Run `go build ./... && go test ./...`: ok.
+- number: 2
+  title: Credential scrubbing (red → green → refactor)
+  steps:
+  - id: P1.T2.S1
+    text: |-
+      Write internal/scrub/scrub_test.go with table cases mirroring frank's scripts/life_scrub.py fixture list: ghs_ installation token, github_pat_ PAT, gho_/ghp_ tokens, Gitea `token <40hex>`, Telegram `\d+:[A-Za-z0-9_-]{35}`, Omni SA key (base64 JSON carrying "name"+"pgp_key"), talosconfig `key:`/`crt:`/`ca:` blocks, kubeconfig `token:`/`client-key-data:`, `Bearer <x>`, sk-ant-/sk- keys, PEM private key blocks; each becomes `«redacted:<kind>»`; a git SHA after `commit ` is NOT redacted; `Find(text)` returns the kinds found. Run `go test ./internal/scrub/`: FAILS.
+  - id: P1.T2.S2
+    text: |-
+      Implement scrub.String / scrub.Find with one ordered pattern table, and scrub.Writer (an io.Writer wrapper) used by the app logger so nothing logged escapes unscrubbed. Run: ok.
+  - id: P1.T2.S3
+    text: |-
+      Refactor: one pattern table shared by String/Find/Writer; add a repo test (internal/scrub/repo_test.go) walking every tracked text file under the module root (testdata included) asserting Find == nil except files under testdata/scrub/ which hold the deliberate fixtures. Run `go test ./internal/scrub/`: ok.
+- number: 3
+  title: Frank repo declarations and version gaps (red → green)
+  steps:
+  - id: P1.T3.S1
+    text: |-
+      Write internal/version/version_test.go: Parse accepts `1.12.6`, `v1.12.6`, `1.35.3-rc.1` and rejects `latest`; Compare orders them; Gap(declared, latest) reports {Major, Minor, Patch} behind (frank Talos 1.12.6 vs 1.14.5 = 0/2/-). Write internal/frankrepo/frankrepo_test.go loading testdata/frank/{versions/frank.yaml,versions/hop.yaml,versions/support-matrix.yaml,update-policy.yaml,smoke/litellm.yaml} through a `Source` interface (fs-backed in tests, GitHub contents API in prod) into typed structs; unknown fields tolerated, missing files = typed "not declared" (never a panic). Run: FAILS.
+  - id: P1.T3.S2
+    text: |-
+      Implement internal/version and internal/frankrepo (FSSource + GitHubSource reading `GET /repos/derio-net/frank/contents/<path>?ref=main`, base64 decode). Resolve a dependency's path with the policy's rules (first match of app|image|chart|dep, else the defaults by update type). Run: ok.
+- number: 4
+  title: Live reads and the inventory (red → green → refactor)
+  steps:
+  - id: P1.T4.S1
+    text: |-
+      Write internal/kube/client_test.go against httptest: List(ctx, "/api/v1/pods") decodes items; a 403 surfaces as a typed error; the client only exposes Get/List for arbitrary paths and Create/Delete restricted to namespace upgrade-sessions (a Create outside it returns ErrForbiddenWrite without a request — R14). Write internal/live/live_test.go decoding fixture JSON for pods (images per app via argocd.argoproj.io/instance or app.kubernetes.io/instance label), nodes (kubeletVersion, osImage Talos version), ArgoCD Applications (operationState.operation.sync.revision, status.sync.revision, health), Rollouts (status.phase, pauseConditions), VulnerabilityReports (summary + vulnerabilities with fixedVersion). Run: FAILS.
+  - id: P1.T4.S2
+    text: |-
+      Implement internal/kube (in-cluster token+CA, or kubeconfig file for Hop: server, CA, bearer token / client cert) and internal/live readers. Run: ok.
+  - id: P1.T4.S3
+    text: |-
+      Write internal/inventory/inventory_test.go: Build(declared, live, latest, policy) groups by cluster → service → dependency with Declared/Running/Latest/Gap/Path/Vulns, flags declared≠running (R3 display), carries Omni (declared from omni env template value, running from the Reader SA read, path operator-runbook) and rows whose live source was unreachable show `unknown`, not missing. Implement. Run `go test ./...`: ok. Refactor: one Dependency key function used by inventory and (later) alarms.
+state:
+  steps:
+    P1.T1.S1:
+      state: x
+      ticked_at: '2026-10-31T19:07:43+00:00'
+      note: null
+    P1.T1.S2:
+      state: x
+      ticked_at: '2026-10-31T19:08:00+00:00'
+      note: null
+    P1.T2.S1:
+      state: x
+      ticked_at: '2026-10-31T19:09:56+00:00'
+      note: null
+    P1.T2.S2:
+      state: x
+      ticked_at: '2026-10-31T19:10:02+00:00'
+      note: null
+    P1.T2.S3:
+      state: x
+      ticked_at: '2026-10-31T19:10:07+00:00'
+      note: null
+    P1.T3.S1:
+      state: x
+      ticked_at: '2026-10-31T19:18:27+00:00'
+      note: null
+    P1.T3.S2:
+      state: x
+      ticked_at: '2026-10-31T19:18:29+00:00'
+      note: null
+    P1.T4.S1:
+      state: x
+      ticked_at: '2026-10-31T19:28:52+00:00'
+      note: null
+    P1.T4.S2:
+      state: x
+      ticked_at: '2026-10-31T19:28:54+00:00'
+      note: null
+    P1.T4.S3:
+      state: x
+      ticked_at: '2026-10-31T19:34:47+00:00'
+      note: null
+  completion:
+    at: '2026-10-31T19:48:38+00:00'
+    note: null
+    observed_prs: []

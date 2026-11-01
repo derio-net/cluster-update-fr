@@ -1,0 +1,101 @@
+name: release
+
+# Publish the image on v* tags. Frank pins ghcr.io/derio-net/cluster-update-fr
+# by bare semver (0.1.0), so `type=semver,pattern={{version}}` is the tag that
+# matters; the git tag and the commit sha are published alongside it.
+#
+# Supply chain (c1s-r7): every action is pinned by full commit SHA (the tag is
+# a comment for Renovate/humans), the Dockerfile bases are pinned by digest,
+# the image carries SLSA provenance and an SBOM attestation, and the pushed
+# digest is written into the GitHub release notes so frank can pin by digest.
+#
+# Least privilege: the workflow default is read-only. The build job (which
+# runs third-party actions and `docker build`) gets packages:write and nothing
+# on the repository; a separate job that checks nothing out gets
+# contents:write and only writes the release notes from the build's output.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    # Gitea Actions reads .github/workflows/ too; publishing to GHCR is a
+    # GitHub-only job, so the mirror must never run it.
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: test
+        run: go test ./...
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/derio-net/cluster-update-fr
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=tag
+            type=sha
+
+      # Buildx provenance/SBOM attestations are pushed to the registry with
+      # the image (packages:write); no id-token or attestations permission.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  release-notes:
+    if: github.server_url == 'https://github.com'
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Release notes with the image digest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in sha256:*) ;; *) echo "no image digest" >&2; exit 1;; esac
+          notes="Image: \`ghcr.io/derio-net/cluster-update-fr@${DIGEST}\` (tag ${TAG#v}; provenance and SBOM attached)"
+          echo "$notes" >> "$GITHUB_STEP_SUMMARY"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes"
+          else
+            gh release create "$TAG" --title "$TAG" --notes "$notes"
+          fi
