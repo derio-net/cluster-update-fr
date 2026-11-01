@@ -9,7 +9,7 @@
 <td>{{or .Approver "—"}}</td>
 <td>{{if .PR}}<a href="https://github.com/derio-net/frank/pull/{{.PR}}">#{{.PR}}</a>{{end}}</td>
 <td class="meta">{{.Rollout}}</td><td class="meta">{{.Verification}}</td>
-<td>{{if and .PR (or (eq (print .State) "merged") (eq (print .State) "applied") (eq (print .State) "verified") (eq (print .State) "failed"))}}{{template "btn" (btn "revert" .ID $csrf "Revert" "danger")}}{{end}}</td></tr>
+<td>{{if and .RevertPR (not .RevertSHA)}}<a href="https://github.com/derio-net/frank/pull/{{.RevertPR}}">revert #{{.RevertPR}}</a> {{template "btn" (btn "merge-revert" .ID $csrf "Merge revert PR" "danger")}}{{else if .RevertSHA}}<span class="meta">revert merged — rolled back once verified</span>{{else if and .PR (or (eq (print .State) "merged") (eq (print .State) "applied") (eq (print .State) "verified") (eq (print .State) "failed"))}}{{template "btn" (btn "revert" .ID $csrf "Revert" "danger")}}{{end}}</td></tr>
 {{else}}<tr><td colspan="7" class="empty">No updates yet.</td></tr>{{end}}
 </table>
 <h2>Events</h2>

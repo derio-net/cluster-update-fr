@@ -54,6 +54,7 @@ type Backend interface {
 	ApproveBatch(ctx context.Context, ids []string, by string) (engine.BatchResult, error)
 	RetryCI(ctx context.Context, id, by string) error
 	Revert(ctx context.Context, id, by string) (string, error)
+	MergeRevert(ctx context.Context, id, by string) error
 	StartSession(ctx context.Context, id, by string) (session.Record, bool, error)
 	EndSession(ctx context.Context, id, by string) error
 	// Attach records operator activity on a running session and returns its
@@ -328,6 +329,8 @@ func (s *server) act(w http.ResponseWriter, r *http.Request) {
 	case "attach":
 		s.attachPage(w, r, id, user, "Attaching to session "+id+".")
 		return
+	case "merge-revert":
+		err, msg = s.b.MergeRevert(ctx, id, user), "revert of "+id+" merged; rolled back once verified"
 	case "merge-session-pr":
 		n, perr := strconv.Atoi(id)
 		if perr != nil || n <= 0 {

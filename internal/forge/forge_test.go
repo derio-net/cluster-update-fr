@@ -27,7 +27,10 @@ func fake(t *testing.T, routes map[string]string) (*httptest.Server, *[]call) {
 		}
 		calls = append(calls, c)
 		key := r.Method + " " + r.URL.Path
-		body, ok := routes[key]
+		body, ok := routes[key+"?"+r.URL.RawQuery] // a route may name its query
+		if !ok {
+			body, ok = routes[key]
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
@@ -118,7 +121,6 @@ func TestStatusesIssuesAndRevert(t *testing.T) {
 		"GET /repos/derio-net/frank/issues":               `[{"number":1,"title":"Dependency Dashboard","body":"x"},{"number":2,"title":"other","body":"y","pull_request":{}}]`,
 		"PATCH /repos/derio-net/frank/issues/1":           `{"number":1}`,
 		"POST /repos/derio-net/frank/issues":              `{"number":9,"html_url":"https://github.com/derio-net/frank/issues/9"}`,
-		"POST /graphql":                                   `{"data":{"revertPullRequest":{"revertPullRequest":{"number":12,"url":"https://github.com/derio-net/frank/pull/12"}}}}`,
 		"POST /repos/derio-net/frank/git/refs":            `{"ref":"refs/heads/x"}`,
 		"POST /repos/derio-net/frank/merges":              `{"sha":"m"}`,
 		"POST /repos/derio-net/frank/pulls":               `{"number":13,"html_url":"u","head":{"sha":"h","ref":"x"}}`,
@@ -143,10 +145,6 @@ func TestStatusesIssuesAndRevert(t *testing.T) {
 	if n, url, err := g.CreateIssue(ctx, "t", "b"); err != nil || n != 9 || url == "" {
 		t.Fatalf("CreateIssue = %d %q %v", n, url, err)
 	}
-	n, url, err := g.RevertPR(ctx, "PR_7", "Revert x", "why")
-	if err != nil || n != 12 || !strings.HasSuffix(url, "/pull/12") {
-		t.Fatalf("RevertPR = %d %q %v", n, url, err)
-	}
 	if err := g.CreateBranch(ctx, "x", "main"); err != nil {
 		t.Fatal(err)
 	}
@@ -157,17 +155,45 @@ func TestStatusesIssuesAndRevert(t *testing.T) {
 	if err != nil || pr.Number != 13 {
 		t.Fatalf("CreatePR = %+v %v", pr, err)
 	}
-	var sawGraphQL bool
+	_ = calls
+}
+
+// c1c-r12: a revert restores each file to the parent commit's content on the
+// console's own branch — changed files PUT with their current blob sha,
+// files absent at the parent DELETEd, files new on the branch created.
+func TestRestoreFilesAndParent(t *testing.T) {
+	srv, calls := fake(t, map[string]string{
+		"GET /repos/derio-net/frank/commits/m7":                                                  `{"sha":"m7","parents":[{"sha":"p7"}]}`,
+		"GET /repos/derio-net/frank/contents/apps/x/values.yaml?ref=p7":                          `{"sha":"blob-old","content":"b2xk\nCg==","encoding":"base64"}`,
+		"GET /repos/derio-net/frank/contents/apps/x/values.yaml?ref=cluster-update%2Frevert-7-x": `{"sha":"blob-x","content":"bmV3Cg==","encoding":"base64"}`,
+		"PUT /repos/derio-net/frank/contents/apps/x/values.yaml":                                 `{"content":{}}`,
+		"GET /repos/derio-net/frank/contents/apps/y/new.yaml?ref=cluster-update%2Frevert-7-x":    `{"sha":"blob-y","content":"eQo=","encoding":"base64"}`,
+		"DELETE /repos/derio-net/frank/contents/apps/y/new.yaml":                                 `{}`,
+	})
+	g := gh(srv, "tkn")
+	ctx := context.Background()
+	if p, err := g.ParentOf(ctx, "m7"); err != nil || p != "p7" {
+		t.Fatalf("ParentOf = %q %v", p, err)
+	}
+	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", []string{"apps/x/values.yaml"}, "Revert #7"); err != nil {
+		t.Fatal(err)
+	}
+	var put map[string]any
 	for _, c := range *calls {
-		if c.Path == "/graphql" {
-			sawGraphQL = true
-			if !strings.Contains(c.Body["query"].(string), "revertPullRequest") {
-				t.Errorf("graphql query = %v", c.Body["query"])
-			}
+		if c.Method == "PUT" {
+			put = c.Body
 		}
 	}
-	if !sawGraphQL {
-		t.Error("revert must use the revertPullRequest mutation")
+	if put["branch"] != "cluster-update/revert-7-x" || put["content"] != "b2xkCg==" || put["sha"] != "blob-x" { // parent content, branch blob sha
+		t.Fatalf("PUT body = %v", put)
+	}
+	// Absent at the parent, present on the branch: deleted.
+	if err := g.RestoreFiles(ctx, "cluster-update/revert-7-x", "p7", []string{"apps/y/new.yaml"}, "Revert #7"); err != nil {
+		t.Fatal(err)
+	}
+	last := (*calls)[len(*calls)-1]
+	if last.Method != "DELETE" || last.Body["sha"] != "blob-y" || last.Body["branch"] != "cluster-update/revert-7-x" {
+		t.Fatalf("delete = %+v", last)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/derio-net/cluster-update-fr/internal/frankrepo"
 	"github.com/derio-net/cluster-update-fr/internal/inventory"
 	"github.com/derio-net/cluster-update-fr/internal/renovate"
+	"github.com/derio-net/cluster-update-fr/internal/scrub"
 	"github.com/derio-net/cluster-update-fr/internal/session"
 	"github.com/derio-net/cluster-update-fr/internal/store"
 	"github.com/derio-net/cluster-update-fr/internal/trust"
@@ -100,9 +101,49 @@ func (a *App) Revert(ctx context.Context, id, by string) (string, error) {
 	if !pr.Merged {
 		return "", fmt.Errorf("app: PR #%d is not merged", u.PR)
 	}
-	_, url, err := a.eng(a.policy()).Revert(ctx, pr, by)
+	if u.RevertPR > 0 && u.RevertSHA == "" {
+		return "", fmt.Errorf("app: revert PR #%d is already open for %s", u.RevertPR, id)
+	}
+	files, err := a.GitHub.PRFiles(ctx, u.PR)
+	if err != nil {
+		return "", err
+	}
+	_, url, err := a.eng(a.policy()).Revert(ctx, pr, files, id, by)
 	_ = a.Store.Save()
 	return url, err
+}
+
+// MergeRevert is the operator's "Merge revert PR": the console merges its
+// own revert PR after the trust check — console bot author, branch
+// cluster-update/revert-<n>-, signed commits pushed by the console's App,
+// files exactly within the reverted PR's — pinned to the verified head.
+// The update is rolled back only when the verifier sees the revert applied.
+func (a *App) MergeRevert(ctx context.Context, id, by string) error {
+	if a.GitHub == nil {
+		return ErrUnavailable
+	}
+	u, ok := a.Store.Get(id)
+	if !ok || u.RevertPR == 0 || u.RevertSHA != "" {
+		return fmt.Errorf("app: %s has no open revert PR", id)
+	}
+	rp, err := a.GitHub.PR(ctx, u.RevertPR)
+	if err != nil {
+		return err
+	}
+	files, err := a.GitHub.PRFiles(ctx, u.PR)
+	if err != nil {
+		return err
+	}
+	a.eng(a.policy())
+	sha, err := a.guard.MergeWithScope(ctx, rp.Number, rp.HeadSHA, trust.RevertScope(u.PR, files))
+	if err != nil {
+		a.Store.AddEvent(store.Event{Update: id, Action: "merge-refused", By: by, PR: rp.Number, Reason: scrub.String(err.Error())})
+		_ = a.Store.Save()
+		return err
+	}
+	err = a.Store.MarkRevertMerged(id, sha, by)
+	_ = a.Store.Save()
+	return err
 }
 
 // SessionPlan is what StartSession resolved an id to.

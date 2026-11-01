@@ -2,10 +2,12 @@ package forge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -227,35 +229,78 @@ func (g *GitHub) CreateIssue(ctx context.Context, title, body string) (int, stri
 	return out.Number, out.URL, err
 }
 
-// RevertPR opens a revert PR for a merged PR (GraphQL revertPullRequest).
-func (g *GitHub) RevertPR(ctx context.Context, nodeID, title, body string) (int, string, error) {
-	q := `mutation($id: ID!, $title: String, $body: String) {
-  revertPullRequest(input: {pullRequestId: $id, title: $title, body: $body}) {
-    revertPullRequest { number url }
-  }
-}`
-	in := map[string]any{"query": q, "variables": map[string]string{"id": nodeID, "title": title, "body": body}}
+// ParentOf returns a commit's first parent (for a squash merge on main:
+// main as it was before the merge).
+func (g *GitHub) ParentOf(ctx context.Context, sha string) (string, error) {
 	var out struct {
-		Data struct {
-			RevertPullRequest struct {
-				RevertPullRequest struct {
-					Number int    `json:"number"`
-					URL    string `json:"url"`
-				} `json:"revertPullRequest"`
-			} `json:"revertPullRequest"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+		Parents []struct {
+			SHA string `json:"sha"`
+		} `json:"parents"`
 	}
-	if err := g.c().do(ctx, http.MethodPost, "/graphql", in, &out, true); err != nil {
-		return 0, "", err
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/commits/"+url.PathEscape(sha)), nil, &out, false); err != nil {
+		return "", err
 	}
-	if len(out.Errors) > 0 {
-		return 0, "", &Error{Status: 422, Method: "POST", Path: "/graphql", Message: out.Errors[0].Message}
+	if len(out.Parents) == 0 {
+		return "", fmt.Errorf("forge: commit %.12s has no parent", sha)
 	}
-	r := out.Data.RevertPullRequest.RevertPullRequest
-	return r.Number, r.URL, nil
+	return out.Parents[0].SHA, nil
+}
+
+func contentsPath(p string) string {
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return "/contents/" + strings.Join(segs, "/")
+}
+
+type content struct {
+	SHA     string `json:"sha"`
+	Content string `json:"content"`
+}
+
+func (g *GitHub) content(ctx context.Context, p, ref string) (content, bool, error) {
+	var c content
+	err := g.c().do(ctx, http.MethodGet, g.repo(contentsPath(p)+"?ref="+url.QueryEscape(ref)), nil, &c, false)
+	if errors.Is(err, ErrNotFound) {
+		return content{}, false, nil
+	}
+	return c, err == nil, err
+}
+
+// RestoreFiles commits, on branch, each file's content as it is at ref —
+// a file absent at ref is deleted — through the contents API, so every
+// commit is made (and signed) by GitHub for the console's App. One commit
+// per file; a file already equal to ref is left alone.
+func (g *GitHub) RestoreFiles(ctx context.Context, branch, ref string, files []string, message string) error {
+	for _, p := range files {
+		want, atRef, err := g.content(ctx, p, ref)
+		if err != nil {
+			return err
+		}
+		cur, onBranch, err := g.content(ctx, p, branch)
+		if err != nil {
+			return err
+		}
+		switch {
+		case atRef && onBranch && cur.SHA == want.SHA:
+			continue // already as at ref
+		case atRef:
+			body := map[string]string{"message": message, "content": strings.ReplaceAll(want.Content, "\n", ""), "branch": branch}
+			if onBranch {
+				body["sha"] = cur.SHA
+			}
+			if err := g.c().do(ctx, http.MethodPut, g.repo(contentsPath(p)), body, nil, true); err != nil {
+				return err
+			}
+		case onBranch:
+			body := map[string]string{"message": message, "sha": cur.SHA, "branch": branch}
+			if err := g.c().do(ctx, http.MethodDelete, g.repo(contentsPath(p)), body, nil, true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // CreateBranch creates branch from the head of base.

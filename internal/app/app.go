@@ -510,6 +510,10 @@ func (a *App) verify(ctx context.Context, decl *frankrepo.Declarations, frank, h
 		a.smoke = map[string]verify.SmokeResult{}
 	}
 	for _, u := range a.Store.Updates() {
+		if u.RevertSHA != "" && u.State != store.RolledBack {
+			a.verifyRevert(ctx, decl, frank, hop, u)
+			continue
+		}
 		if u.State != store.Merged && u.State != store.Applied {
 			continue
 		}
@@ -571,6 +575,49 @@ func (a *App) verify(ctx context.Context, decl *frankrepo.Declarations, frank, h
 			_ = a.Store.Transition(u.ID, store.Failed, "verifier", out.Reason, set)
 		}
 	}
+}
+
+// verifyRevert: an update is ROLLED BACK only once its revert PR is merged
+// and the revert is applied and verified like any update (c1c-r12): for
+// workloads ArgoCD's last sync operation contains the revert commit and the
+// smoke checks pass; for OS steps the nodes run the (reverted) declared
+// version. Until then the update keeps its state and says so.
+func (a *App) verifyRevert(ctx context.Context, decl *frankrepo.Declarations, frank, hop *live.Snapshot, u store.Update) {
+	snap, cv := frank, decl.Frank
+	if u.Cluster == "hop" {
+		snap, cv = hop, decl.Hop
+	}
+	var out verify.Outcome
+	switch u.Kind {
+	case inventory.KindTalos, inventory.KindKubernetes:
+		out = verify.OS(cv, snap, a.clusterSmoke(ctx, decl, u.Cluster))
+	default:
+		apps := u.Apps
+		for _, m := range u.Members {
+			if mu, ok := a.Store.Get(m); ok {
+				apps = append(apps, mu.Apps...)
+			}
+		}
+		if len(apps) == 0 {
+			return
+		}
+		res := map[string]verify.SmokeResult{}
+		for _, app := range apps {
+			if s, ok := decl.Smoke[app]; ok && a.Smoke != nil {
+				res[app] = a.Smoke(ctx, s)
+			} else {
+				res[app] = verify.SmokeResult{App: app}
+			}
+		}
+		out = verify.Workload(ctx, verify.WorkloadInput{Apps: apps, MergeSHA: u.RevertSHA, Repo: a.Cfg.FrankRepo, Snapshot: snap, Ancestry: a.Ancestry, Smoke: res})
+	}
+	if out.To == verify.OutcomeVerified {
+		_ = a.Store.Transition(u.ID, store.RolledBack, "verifier", fmt.Sprintf("revert PR #%d merged and verified", u.RevertPR), func(x *store.Update) {
+			x.Rollout, x.Verification = out.Rollout, "revert verified: "+out.Reason
+		})
+		return
+	}
+	_ = a.Store.Edit(u.ID, func(x *store.Update) { x.Verification = "revert merged, not yet verified: " + out.Reason })
 }
 
 // batchOutcome verifies a batch through its members, each verified on its
@@ -785,6 +832,12 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapsho
 		if (u.State == store.Pending || u.State == store.Approved || u.State == store.Held) && u.PR > 0 && !open[u.PR] {
 			if p, err := a.GitHub.PR(ctx, u.PR); err == nil && p.Merged {
 				merged[u.PR] = p.MergeCommitSHA
+			}
+		}
+		// A revert PR merged outside the console still has to be verified.
+		if u.RevertPR > 0 && u.RevertSHA == "" && !open[u.RevertPR] {
+			if p, err := a.GitHub.PR(ctx, u.RevertPR); err == nil && p.Merged {
+				_ = a.Store.MarkRevertMerged(u.ID, p.MergeCommitSHA, "reconciler")
 			}
 		}
 	}

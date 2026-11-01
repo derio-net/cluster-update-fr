@@ -85,6 +85,10 @@ func (f *fakeBackend) StepEvent(id, token string, start bool, name string) error
 	f.rec("step", id, name)
 	return nil
 }
+func (f *fakeBackend) MergeRevert(_ context.Context, id, by string) error {
+	f.rec("merge-revert", id, by)
+	return nil
+}
 func (f *fakeBackend) RequestMerge(_ context.Context, id, token string, pr int) error {
 	if token != "good" {
 		return session.ErrBadToken

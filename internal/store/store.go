@@ -102,6 +102,10 @@ type Update struct {
 	// is the batch PR that took it to main (c1c-r3).
 	Members   []string `json:"members,omitempty"`
 	ShippedIn int      `json:"shipped_in,omitempty"`
+	// RevertPR is the console's open revert PR; RevertSHA its merge commit
+	// once merged. Rolled back = revert merged AND verified (c1c-r12).
+	RevertPR  int    `json:"revert_pr,omitempty"`
+	RevertSHA string `json:"revert_sha,omitempty"`
 }
 
 // Event is one History entry.
@@ -315,6 +319,20 @@ func (s *Store) MarkMerged(id, sha string, pr int, by, reason string) error {
 	}
 	set(u)
 	s.appendEvent(Event{At: s.now(), Update: id, Action: "merged", By: by, PR: pr, SHA: sha, Reason: reason})
+	return nil
+}
+
+// MarkRevertMerged records that the update's revert PR merged at sha; the
+// verifier moves it to rolled-back once that commit is applied and verified.
+func (s *Store) MarkRevertMerged(id, sha, by string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.d.Updates[id]
+	if !ok {
+		return ErrUnknown
+	}
+	u.RevertSHA = sha
+	s.appendEvent(Event{At: s.now(), Update: id, Action: "revert-merged", By: by, PR: u.RevertPR, SHA: sha, Reason: fmt.Sprintf("revert PR #%d merged; rolled back once verified", u.RevertPR)})
 	return nil
 }
 
@@ -546,9 +564,9 @@ func (s *Store) Record(e engine.Event) {
 	case "failed-ci":
 		_ = s.transition(e.Item, Failed, e.By, "failed — CI: "+e.Detail, nil)
 	case "revert-opened":
-		if u.State == Merged || u.State == Applied || u.State == Verified || u.State == Failed {
-			_ = s.transition(e.Item, RolledBack, e.By, "revert PR #"+fmt.Sprint(e.PR)+" opened", nil)
-		}
+		// Opening a revert rolls nothing back (c1c-r12): the update stays as
+		// it is until the revert PR is merged AND verified.
+		u.RevertPR, u.RevertSHA = e.PR, ""
 	}
 }
 

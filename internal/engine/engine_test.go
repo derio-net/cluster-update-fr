@@ -54,9 +54,14 @@ func (f *fakeForge) CreatePR(_ context.Context, title, head, base, body string) 
 	f.prs = append(f.prs, pr)
 	return pr, nil
 }
-func (f *fakeForge) RevertPR(_ context.Context, node, _, _ string) (int, string, error) {
-	f.reverts = append(f.reverts, node)
-	return 77, "https://github.com/derio-net/frank/pull/77", nil
+func (f *fakeForge) ParentOf(_ context.Context, sha string) (string, error) {
+	return "parent-of-" + sha, nil
+}
+func (f *fakeForge) RestoreFiles(_ context.Context, branch, ref string, files []string, _ string) error {
+	for _, p := range files {
+		f.reverts = append(f.reverts, branch+"@"+ref+":"+p)
+	}
+	return nil
 }
 func (f *fakeForge) FindIssue(context.Context, string) (forge.Issue, error) { return f.issue, nil }
 func (f *fakeForge) UpdateIssueBody(_ context.Context, _ int, body string) error {
@@ -336,13 +341,25 @@ func TestRollbackText(t *testing.T) {
 	}
 }
 
+// c1c-r12: the revert PR is the console's own — a branch on
+// cluster-update/revert-<n>-, the reverted PR's files restored to the merge
+// commit's parent — and opening it changes no state.
 func TestRevert(t *testing.T) {
 	f, l := &fakeForge{}, newLedger()
 	now := t0
 	e := newEngine(f, l, &now, emptyInv())
-	n, _, err := e.Revert(context.Background(), forge.PR{Number: 7, NodeID: "PR_7", Title: "Update x"}, "derio")
-	if err != nil || n != 77 || len(f.reverts) != 1 || l.events[0].Action != "revert-opened" {
-		t.Fatalf("revert = %d %v %+v", n, err, l.events)
+	n, _, err := e.Revert(context.Background(), forge.PR{Number: 7, Title: "Update x", MergeCommitSHA: "m7"}, []string{"apps/x/values.yaml"}, "pr-7", "derio")
+	if err != nil || n != 100 {
+		t.Fatalf("revert = %d %v", n, err)
+	}
+	if len(f.branches) != 1 || !strings.HasPrefix(f.branches[0], RevertBranchPrefix+"7-") {
+		t.Fatalf("revert branch = %v", f.branches)
+	}
+	if len(f.reverts) != 1 || f.reverts[0] != f.branches[0]+"@parent-of-m7:apps/x/values.yaml" {
+		t.Fatalf("restored = %v", f.reverts)
+	}
+	if f.prs[0].HeadRef != f.branches[0] || l.events[0].Action != "revert-opened" || l.events[0].Item != "pr-7" || l.events[0].PR != 100 {
+		t.Fatalf("pr %+v events %+v", f.prs, l.events)
 	}
 }
 

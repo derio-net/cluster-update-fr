@@ -50,6 +50,8 @@ type fakeGitHub struct {
 	// noCI lists head SHAs with no statuses at all.
 	pushedAt map[int]time.Time
 	noCI     map[string]bool
+	created  []int
+	restored map[string][]string
 }
 
 const renovateBot = "renovate-frank[bot]"
@@ -167,11 +169,38 @@ func (g *fakeGitHub) Merge(_ context.Context, n int, _ string) (string, error) {
 }
 func (g *fakeGitHub) CreateBranch(context.Context, string, string) error        { return nil }
 func (g *fakeGitHub) MergeBranch(context.Context, string, string, string) error { return nil }
-func (g *fakeGitHub) CreatePR(context.Context, string, string, string, string) (forge.PR, error) {
-	return forge.PR{Number: 500}, nil
+
+// CreatePR opens a console-bot PR whose commits are the files restored on
+// its branch (so a revert PR can pass the trust check like the real one).
+func (g *fakeGitHub) CreatePR(_ context.Context, title, head, base, _ string) (forge.PR, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := 500 + len(g.created)
+	p := forge.PR{Number: n, Title: title, HeadRef: head, BaseRef: base, HeadSHA: fmt.Sprintf("c%d", n), Author: "cluster-update-fr[bot]", State: "open",
+		HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank", CreatedAt: t0, UpdatedAt: t0}
+	g.created = append(g.created, n)
+	g.prs = append(g.prs, p)
+	if g.commits == nil {
+		g.commits = map[int][]forge.Commit{}
+	}
+	if g.files == nil {
+		g.files = map[int][]string{}
+	}
+	g.commits[n] = []forge.Commit{signedCommit(p.HeadSHA, "cluster-update-fr[bot]")}
+	g.files[n] = g.restored[head]
+	return p, nil
 }
-func (g *fakeGitHub) RevertPR(context.Context, string, string, string) (int, string, error) {
-	return 501, "u", nil
+func (g *fakeGitHub) ParentOf(_ context.Context, sha string) (string, error) {
+	return "parent-" + sha, nil
+}
+func (g *fakeGitHub) RestoreFiles(_ context.Context, branch, _ string, files []string, _ string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.restored == nil {
+		g.restored = map[string][]string{}
+	}
+	g.restored[branch] = append(g.restored[branch], files...)
+	return nil
 }
 
 type fakeSender struct {
@@ -523,6 +552,63 @@ func TestSessionPRMergeRoute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type containsAll struct{}
+
+func (containsAll) Contains(context.Context, string, string) (bool, error) { return true, nil }
+
+// c1c-r12: opening a revert PR rolls nothing back; the console merges its own
+// revert PR (console bot, cluster-update/revert-<n>-, files within the
+// reverted PR) and the update is rolled-back only once the revert is applied
+// and verified.
+func TestRevertIsRolledBackOnlyWhenMergedAndVerified(t *testing.T) {
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	a.Cycle(context.Background()) // pr-7 (homepage patch) auto-merges
+	u, _ := a.Store.Get("pr-7")
+	if u.State == store.Pending {
+		t.Fatalf("precondition: pr-7 merged, got %s", u.State)
+	}
+	if _, err := a.Revert(context.Background(), "pr-7", "derio"); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = a.Store.Get("pr-7")
+	if u.State == store.RolledBack || u.RevertPR != 500 {
+		t.Fatalf("opening the revert must not roll back: %+v", u)
+	}
+	if b := gh.prs[len(gh.prs)-1].HeadRef; !strings.HasPrefix(b, engine.RevertBranchPrefix+"7-") {
+		t.Fatalf("revert branch = %q", b)
+	}
+	if err := a.MergeRevert(context.Background(), "pr-7", "derio"); err != nil {
+		t.Fatalf("console merging its own revert PR: %v", err)
+	}
+	a.Cycle(context.Background()) // ArgoCD has not applied the revert yet (no ancestry)
+	if u, _ := a.Store.Get("pr-7"); u.State == store.RolledBack || u.RevertSHA != "merge-500" {
+		t.Fatalf("rolled back before the revert was verified: %+v", u)
+	}
+	a.Ancestry = containsAll{} // the applied revision now contains the revert
+	a.Cycle(context.Background())
+	if u, _ := a.Store.Get("pr-7"); u.State != store.RolledBack {
+		t.Fatalf("revert merged and verified: %+v", u)
+	}
+}
+
+// A revert PR that is not the console's own (a human pushed to it) is never
+// merged by the console.
+func TestForeignRevertPRIsRefused(t *testing.T) {
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	a.Cycle(context.Background())
+	if _, err := a.Revert(context.Background(), "pr-7", "derio"); err != nil {
+		t.Fatal(err)
+	}
+	gh.mu.Lock()
+	gh.commits[500] = append(gh.commits[500], signedCommit("c500", "mallory"))
+	gh.mu.Unlock()
+	if err := a.MergeRevert(context.Background(), "pr-7", "derio"); err == nil {
+		t.Fatal("a revert PR with a foreign commit was merged")
 	}
 }
 

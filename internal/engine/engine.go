@@ -83,7 +83,10 @@ type Forge interface {
 	CreateBranch(ctx context.Context, branch, base string) error
 	MergeBranch(ctx context.Context, base, head, message string) error
 	CreatePR(ctx context.Context, title, head, base, body string) (forge.PR, error)
-	RevertPR(ctx context.Context, nodeID, title, body string) (int, string, error)
+	// ParentOf returns a commit's first parent; RestoreFiles commits, on
+	// branch, each file's content at ref (deleting files absent there).
+	ParentOf(ctx context.Context, sha string) (string, error)
+	RestoreFiles(ctx context.Context, branch, ref string, files []string, message string) error
 }
 
 // Item is one update candidate (an open Renovate or batch PR).
@@ -558,14 +561,35 @@ func (e *Engine) ApproveBatch(ctx context.Context, items []Item, ids []string, b
 	return res, nil
 }
 
-// Revert opens the one-click revert PR for a merged PR.
-func (e *Engine) Revert(ctx context.Context, merged forge.PR, by string) (int, string, error) {
-	n, url, err := e.Forge.RevertPR(ctx, merged.NodeID, "Revert: "+merged.Title, "Reverts #"+fmt.Sprint(merged.Number)+" from the update console ("+by+").")
+// Revert opens the one-click revert PR for a merged PR, as the console's
+// own PR (c1c-r12): a branch cluster-update/revert-<n>-<time> from main on
+// which every file the reverted PR changed is restored to the merge
+// commit's parent. The console merges it later on the operator's click
+// (after the same trust check); opening it changes no update state — an
+// update is rolled back only once the revert is merged AND verified.
+func (e *Engine) Revert(ctx context.Context, merged forge.PR, files []string, id, by string) (int, string, error) {
+	if merged.MergeCommitSHA == "" || len(files) == 0 {
+		return 0, "", errors.New("engine: nothing to revert (no merge commit or no files)")
+	}
+	parent, err := e.Forge.ParentOf(ctx, merged.MergeCommitSHA)
 	if err != nil {
 		return 0, "", err
 	}
-	e.Ledger.Record(Event{At: e.Now(), Item: ItemID(merged.Number), Action: "revert-opened", By: by, PR: n, Detail: url})
-	return n, url, nil
+	branch := fmt.Sprintf("%s%d-%s", RevertBranchPrefix, merged.Number, e.Now().UTC().Format("20060102-150405"))
+	if err := e.Forge.CreateBranch(ctx, branch, "main"); err != nil {
+		return 0, "", err
+	}
+	msg := fmt.Sprintf("Revert #%d: %s", merged.Number, merged.Title)
+	if err := e.Forge.RestoreFiles(ctx, branch, parent, files, msg); err != nil {
+		return 0, "", err
+	}
+	pr, err := e.Forge.CreatePR(ctx, "Revert: "+merged.Title, branch, "main",
+		fmt.Sprintf("Reverts #%d (merge %.12s) from the update console (%s): restores %s to %.12s.\n", merged.Number, merged.MergeCommitSHA, by, strings.Join(files, ", "), parent))
+	if err != nil {
+		return 0, "", err
+	}
+	e.Ledger.Record(Event{At: e.Now(), Item: id, Action: "revert-opened", By: by, PR: pr.Number, Detail: pr.URL})
+	return pr.Number, pr.URL, nil
 }
 
 // Rollback states how an item is undone, shown before it is approved (R19).
