@@ -2,7 +2,7 @@ package cidiag
 
 import (
 	"context"
-	"sort"
+	"path"
 	"strings"
 	"time"
 
@@ -12,47 +12,76 @@ import (
 // CI sources a repo's update-policy.yaml may declare (ci_source, p4-r2).
 // Anything else — including unset — means nothing passes CI.
 const (
-	// SourceGitHubChecks: GitHub check-runs from the GitHub Actions app
-	// (frank: public, GitHub-hosted runners, never mirrored to Gitea).
+	// SourceGitHubChecks: GitHub Actions check-runs (frank: public,
+	// GitHub-hosted runners, never mirrored to Gitea).
 	SourceGitHubChecks = "github-checks"
 	// SourceGiteaStatuses: bridged gitea-actions/* commit statuses.
 	SourceGiteaStatuses = "gitea-statuses"
 )
 
-// ActionsApp is the slug of the GitHub Actions app: the only creator whose
-// check-runs count (the equivalent of the status-creator check).
+// ActionsApp is the slug of the GitHub Actions app. Necessary but NOT
+// sufficient (p4-r2b): every GITHUB_TOKEN-created check-run carries it, so a
+// check-run counts only through the workflow run that produced it.
 const ActionsApp = "github-actions"
 
 // KnownSource reports whether s is a CI source the console can evaluate.
 func KnownSource(s string) bool { return s == SourceGitHubChecks || s == SourceGiteaStatuses }
 
-// ResultMissing: the workflow runs for the head concluded, but a required
+// CheckRef is one required check: the check-run Name produced by the
+// workflow file at Workflow. Invalid entries (wrong policy shape) never pass.
+type CheckRef struct {
+	Workflow string
+	Name     string
+	Invalid  bool
+}
+
+func (c CheckRef) String() string { return c.Workflow + " / " + c.Name }
+
+// valid: a .yml/.yaml file directly under .github/workflows/.
+func (c CheckRef) valid() bool {
+	if c.Invalid || c.Name == "" || path.Clean(c.Workflow) != c.Workflow || path.Dir(c.Workflow) != ".github/workflows" {
+		return false
+	}
+	return strings.HasSuffix(c.Workflow, ".yml") || strings.HasSuffix(c.Workflow, ".yaml")
+}
+
+// ResultMissing: the workflow run for a required check concluded, but its
 // check-run is absent, still queued, or concluded neither pass nor fail
-// (neutral/skipped). No automatic recovery: it needs the operator (often a
-// renamed job that no longer matches required_ci_checks).
+// (neutral/skipped). No automatic recovery: it needs the operator.
 const ResultMissing Cause = "result-missing"
 
 // ActionGitHubRerun is a GitHub rerun-failed-jobs request.
 const ActionGitHubRerun ActionKind = "github-rerun-failed-jobs"
 
-// latestChecks keeps only the check-runs that count: on exactly sha,
-// created by the GitHub Actions app; the newest (highest id) per name.
-func latestChecks(runs []forge.CheckRun, sha string) map[string]forge.CheckRun {
-	out := map[string]forge.CheckRun{}
-	for _, r := range runs {
-		if sha == "" || r.HeadSHA != sha || r.App.Slug != ActionsApp {
-			continue
-		}
-		if cur, ok := out[r.Name]; !ok || r.ID > cur.ID {
-			out[r.Name] = r
-		}
+// Evidence is what github-checks CI is judged on, all for one head SHA.
+type Evidence struct {
+	SHA       string
+	Repo      string // owner/name the runs must live in and come from ("" = only same-repo)
+	CheckRuns []forge.CheckRun
+	Workflows []forge.WorkflowRun
+	Statuses  []forge.Status // only for Renovate's release-age gate
+}
+
+// eligibleRun: a run of exactly the declared workflow file, on exactly the
+// head SHA, triggered by push or pull_request (never pull_request_target or
+// a workflow_run chain), whose head commit came from the repo itself (not a
+// fork).
+func eligibleRun(w forge.WorkflowRun, ref CheckRef, ev Evidence) bool {
+	if ev.SHA == "" || w.HeadSHA != ev.SHA || w.Path != ref.Workflow {
+		return false
 	}
-	return out
+	if w.Event != "push" && w.Event != "pull_request" {
+		return false
+	}
+	repo, head := w.Repository.FullName, w.HeadRepository.FullName
+	if repo == "" || head != repo {
+		return false
+	}
+	return ev.Repo == "" || repo == ev.Repo
 }
 
 func checkPassed(r forge.CheckRun) bool { return r.Status == "completed" && r.Conclusion == "success" }
 
-// inconclusive: completed, but neither a pass nor a failure.
 func inconclusive(r forge.CheckRun) bool {
 	return r.Status == "completed" && (r.Conclusion == "neutral" || r.Conclusion == "skipped")
 }
@@ -61,69 +90,123 @@ func checkFailed(r forge.CheckRun) bool {
 	return r.Status == "completed" && !checkPassed(r) && !inconclusive(r)
 }
 
-func (r Requirement) checks() []string {
-	var out []string
-	for _, c := range r.Checks {
-		if c = strings.TrimSpace(c); c != "" {
-			out = append(out, c)
-		}
-	}
-	return out
+type checkState int
+
+const (
+	stNoRun checkState = iota
+	stRunning
+	stPassed
+	stFailed
+	stMissing
+)
+
+type assessed struct {
+	state  checkState
+	run    forge.WorkflowRun
+	detail string
 }
 
-// EvaluateChecks reads the GitHub check-runs of the PR head sha pushed at
-// headAt (ci_source: github-checks). Every name in req.Checks must have a
-// check-run on exactly sha, created by the GitHub Actions app, completed
-// with conclusion success — neutral or skipped is not a pass. An empty
-// req.Checks means nothing passes. After a retry (req.Since), a failure that
-// completed at or before the retry is ignored (it is what the retry acted
-// on); a success from a job the retry did not re-run still counts.
-func EvaluateChecks(runs []forge.CheckRun, statuses []forge.Status, sha string, headAt, now time.Time, timeout time.Duration, req Requirement) (Verdict, string) {
+// assess judges one required check. The matched run is the newest eligible
+// run (GitHub lists each run at its latest attempt); the check-run is the
+// newest one with the required name INSIDE that run's check suite, never
+// one from another run. Both must have succeeded. After a retry (since), a
+// failure that completed at or before it is the one the retry acted on and
+// reads as still running.
+func assess(ref CheckRef, ev Evidence, since time.Time) assessed {
+	var run *forge.WorkflowRun
+	for i, w := range ev.Workflows {
+		if eligibleRun(w, ref, ev) && (run == nil || w.ID > run.ID) {
+			run = &ev.Workflows[i]
+		}
+	}
+	if run == nil {
+		return assessed{state: stNoRun, detail: "no " + ref.Workflow + " run on " + short(ev.SHA)}
+	}
+	a := assessed{run: *run}
+	var check *forge.CheckRun
+	for i, c := range ev.CheckRuns {
+		if c.Name == ref.Name && c.HeadSHA == ev.SHA && c.App.Slug == ActionsApp && run.CheckSuiteID != 0 && c.CheckSuite.ID == run.CheckSuiteID &&
+			(check == nil || c.ID > check.ID) {
+			check = &ev.CheckRuns[i]
+		}
+	}
+	stale := func(t time.Time) bool { return !since.IsZero() && !t.After(since) }
+	switch {
+	case check != nil && checkFailed(*check):
+		if stale(check.CompletedAt) {
+			a.state, a.detail = stRunning, ref.String()+" re-run requested"
+			return a
+		}
+		a.state, a.detail = stFailed, ref.String()+" "+check.Conclusion
+	case run.Status != "completed":
+		a.state, a.detail = stRunning, ref.Workflow+" run "+run.Status
+	case check == nil:
+		a.state, a.detail = stMissing, ref.String()+" has no check-run in its workflow run"
+	case inconclusive(*check):
+		a.state, a.detail = stMissing, ref.String()+" was "+check.Conclusion+", not passed"
+	case !checkPassed(*check):
+		a.state, a.detail = stMissing, ref.String()+" still "+check.Status
+	case run.Conclusion != "success":
+		if stale(run.UpdatedAt) {
+			a.state, a.detail = stRunning, ref.Workflow+" re-run requested"
+			return a
+		}
+		a.state, a.detail = stFailed, ref.Workflow+" run concluded "+run.Conclusion
+	default:
+		a.state = stPassed
+	}
+	return a
+}
+
+// usable returns the required checks, or false if there are none or any
+// is malformed (nothing passes).
+func (r Requirement) usable() ([]CheckRef, bool) {
+	if len(r.Checks) == 0 {
+		return nil, false
+	}
+	for _, c := range r.Checks {
+		if !c.valid() {
+			return nil, false
+		}
+	}
+	return r.Checks, true
+}
+
+// EvaluateChecks judges a PR head pushed at headAt (ci_source:
+// github-checks). Every required (workflow, name) pair must have an eligible
+// workflow run of that file on the head SHA that concluded success, and in
+// it a check-run of that name completed with success (neutral/skipped is not
+// a pass). No required checks, or a malformed entry, means nothing passes.
+func EvaluateChecks(ev Evidence, headAt, now time.Time, timeout time.Duration, req Requirement) (Verdict, string) {
 	if req.Since.After(headAt) {
 		headAt = req.Since
 	}
 	late := now.Sub(headAt) > timeout
-	wait := func(detail string) (Verdict, string) {
-		if late {
-			return Missing, detail + " after " + timeout.String()
-		}
-		return Pending, detail
+	required, ok := req.usable()
+	if !ok {
+		return Pending, "required_ci_checks missing or not [{workflow, name}] pairs in update-policy.yaml: nothing passes"
 	}
-	required := req.checks()
-	if len(required) == 0 {
-		return Pending, "no required_ci_checks declared in update-policy.yaml: nothing passes"
-	}
-	latest := latestChecks(runs, sha)
-	if !req.Since.IsZero() {
-		for n, r := range latest {
-			if !checkPassed(r) && r.Status == "completed" && !r.CompletedAt.After(req.Since) {
-				delete(latest, n) // the result the retry acted on
+	pending, why := false, ""
+	for _, ref := range required {
+		a := assess(ref, ev, req.Since)
+		switch a.state {
+		case stFailed:
+			return Failed, a.detail
+		case stMissing:
+			return Missing, a.detail
+		case stNoRun, stRunning:
+			if !pending {
+				pending, why = true, a.detail
 			}
-		}
-	}
-	sort.Strings(required)
-	pending := false
-	for _, name := range required {
-		r, ok := latest[name]
-		switch {
-		case !ok:
-			return wait("required check " + name + " has not reported on " + short(sha))
-		case checkPassed(r):
-		case inconclusive(r):
-			return Missing, "required check " + name + " was " + r.Conclusion + ", not passed"
-		case checkFailed(r):
-			return Failed, name + " " + r.Conclusion
-		default:
-			pending = true
 		}
 	}
 	if pending {
 		if late {
-			return Missing, "CI still pending after " + timeout.String()
+			return Missing, why + " after " + timeout.String()
 		}
-		return Pending, "CI running"
+		return Pending, why
 	}
-	if s, ok := forge.Latest(statuses)["renovate/stability-days"]; ok && s.State == "pending" {
+	if s, ok := forge.Latest(ev.Statuses)["renovate/stability-days"]; ok && s.State == "pending" {
 		return Waiting, "waiting for Renovate's minimum release age"
 	}
 	return Passed, "CI passed"
@@ -147,83 +230,54 @@ type ChecksForges interface {
 
 var _ ChecksForges = (*forge.GitHub)(nil)
 
-var failedRun = map[string]bool{"failure": true, "cancelled": true, "timed_out": true, "startup_failure": true}
-
 // DiagnoseChecks gathers the evidence for a held PR on a github-checks repo:
 //
-//	never ran       no workflow run for the head SHA (mergeable checked
-//	                first: a conflicting PR gets no pull_request run)
-//	ran and failed  a required check-run failed, or its workflow run did
-//	ran, missing    runs concluded but a required check-run is absent,
-//	                queued, neutral or skipped
-func DiagnoseChecks(ctx context.Context, f ChecksForges, pr forge.PR, req Requirement) Diagnosis {
-	required := req.checks()
-	if len(required) == 0 {
-		return Diagnosis{Cause: Unknown, Detail: "no required_ci_checks declared: nothing passes, needs the operator"}
+//	never ran       no eligible run of a required workflow on the head SHA
+//	                (mergeable checked first: a conflicting PR gets no
+//	                pull_request run)
+//	ran and failed  a required check-run or its workflow run failed
+//	ran, missing    the run concluded but the check-run is absent, queued,
+//	                neutral or skipped
+func DiagnoseChecks(ctx context.Context, f ChecksForges, pr forge.PR, req Requirement, repo string) Diagnosis {
+	required, ok := req.usable()
+	if !ok {
+		return Diagnosis{Cause: Unknown, Detail: "required_ci_checks missing or malformed: nothing passes, needs the operator"}
 	}
-	all, err := f.WorkflowRuns(ctx, pr.HeadSHA)
+	wf, err := f.WorkflowRuns(ctx, pr.HeadSHA)
 	if err != nil {
 		return Diagnosis{Cause: Unknown, Detail: "GitHub workflow runs unreadable: " + err.Error()}
-	}
-	var wruns []forge.WorkflowRun
-	for _, w := range all {
-		if w.HeadSHA == pr.HeadSHA && pr.HeadSHA != "" {
-			wruns = append(wruns, w)
-		}
-	}
-	if len(wruns) == 0 {
-		d := Diagnosis{Cause: NeverRan, Detail: "no GitHub Actions run for the head commit"}
-		if p, err := f.PR(ctx, pr.Number); err == nil && p.Mergeable != nil && !*p.Mergeable {
-			d.Conflicting, d.Detail = true, "no GitHub Actions run: the PR conflicts with main, so no merge ref exists"
-		}
-		return d
-	}
-	for _, w := range wruns {
-		if w.Status != "completed" {
-			return Diagnosis{Cause: Running, Detail: "GitHub Actions run " + w.Name + " still " + w.Status}
-		}
 	}
 	runs, err := f.CheckRuns(ctx, pr.HeadSHA)
 	if err != nil {
 		return Diagnosis{Cause: Unknown, Detail: "GitHub check-runs unreadable: " + err.Error()}
 	}
-	latest := latestChecks(runs, pr.HeadSHA)
-	sort.Strings(required)
-	for _, name := range required {
-		r, ok := latest[name]
-		if !ok || !checkFailed(r) {
-			continue
+	ev := Evidence{SHA: pr.HeadSHA, Repo: repo, CheckRuns: runs, Workflows: wf}
+	var all []assessed
+	for _, ref := range required {
+		all = append(all, assess(ref, ev, time.Time{}))
+	}
+	for _, a := range all {
+		if a.state == stRunning {
+			return Diagnosis{Cause: Running, Detail: a.detail}
 		}
-		for _, w := range wruns {
-			if w.CheckSuiteID != 0 && w.CheckSuiteID == r.CheckSuite.ID {
-				return Diagnosis{Cause: RanFailed, RunID: w.ID, Detail: "required check " + name + " concluded " + r.Conclusion + " (run " + w.Name + ")"}
+	}
+	for _, a := range all {
+		if a.state == stFailed {
+			return Diagnosis{Cause: RanFailed, RunID: a.run.ID, Detail: a.detail}
+		}
+	}
+	for _, a := range all {
+		if a.state == stMissing {
+			return Diagnosis{Cause: ResultMissing, Detail: a.detail}
+		}
+	}
+	for _, a := range all {
+		if a.state == stNoRun {
+			d := Diagnosis{Cause: NeverRan, Detail: a.detail}
+			if p, err := f.PR(ctx, pr.Number); err == nil && p.Mergeable != nil && !*p.Mergeable {
+				d.Conflicting, d.Detail = true, a.detail+": the PR conflicts with main, so no merge ref exists"
 			}
-		}
-		for _, w := range wruns {
-			if failedRun[w.Conclusion] {
-				return Diagnosis{Cause: RanFailed, RunID: w.ID, Detail: "required check " + name + " concluded " + r.Conclusion + "; run " + w.Name + " " + w.Conclusion}
-			}
-		}
-		return Diagnosis{Cause: RanFailed, Detail: "required check " + name + " concluded " + r.Conclusion + "; its workflow run is not identifiable"}
-	}
-	var missing []string
-	for _, name := range required {
-		r, ok := latest[name]
-		switch {
-		case !ok:
-			missing = append(missing, name+" (absent)")
-		case inconclusive(r):
-			missing = append(missing, name+" ("+r.Conclusion+")")
-		case r.Status != "completed":
-			missing = append(missing, name+" ("+r.Status+")")
-		}
-	}
-	if len(missing) > 0 {
-		return Diagnosis{Cause: ResultMissing, Detail: "workflow runs concluded but these required check-runs did not succeed — " + strings.Join(missing, ", ")}
-	}
-	for _, w := range wruns {
-		if failedRun[w.Conclusion] {
-			return Diagnosis{Cause: RanFailed, RunID: w.ID, Detail: "run " + w.Name + " concluded " + w.Conclusion}
+			return d
 		}
 	}
 	return Diagnosis{Cause: Unknown, Detail: "check-runs agree; nothing to recover"}

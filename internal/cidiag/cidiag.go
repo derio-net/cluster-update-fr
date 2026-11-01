@@ -59,9 +59,9 @@ type Requirement struct {
 	// Source is the repo's declared ci_source (SourceGitHubChecks or
 	// SourceGiteaStatuses); any other value means nothing passes.
 	Source string
-	// Checks are the required GitHub check-run names (github-checks only);
-	// empty means nothing passes.
-	Checks   []string
+	// Checks are the required (workflow path, check-run name) pairs
+	// (github-checks only); empty or malformed means nothing passes.
+	Checks   []CheckRef
 	Contexts []string
 	Creators []string
 	// Excluded logins never count, even when listed in Creators (c1d-r12):

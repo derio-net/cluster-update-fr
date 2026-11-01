@@ -131,9 +131,44 @@ type Policy struct {
 	// "gitea-statuses" (bridged Gitea statuses, RequiredCIContexts). Unset
 	// or anything else: nothing passes CI.
 	CISource string `yaml:"ci_source"`
-	// RequiredCIChecks are the GitHub check-run names that must ALL succeed
-	// on the head SHA (github-checks); empty = nothing passes.
-	RequiredCIChecks []string `yaml:"required_ci_checks"`
+	// RequiredCIChecks are the (workflow path, check name) pairs that must
+	// ALL succeed on the head SHA (github-checks, p4-r2b); empty, or any
+	// entry not of that shape (e.g. a bare name) = nothing passes.
+	RequiredCIChecks []RequiredCheck `yaml:"required_ci_checks"`
+}
+
+// RequiredCheck is one required GitHub Actions check: the check-run Name
+// produced by the workflow file at Workflow (.github/workflows/<file>.yml).
+// Invalid marks an entry of any other shape; it never passes.
+type RequiredCheck struct {
+	Workflow string
+	Name     string
+	Invalid  bool
+}
+
+// UnmarshalYAML accepts only {workflow, name} mappings; anything else (the
+// old bare-name list, extra keys, empty values) decodes as Invalid rather
+// than failing the whole policy.
+func (c *RequiredCheck) UnmarshalYAML(n *yaml.Node) error {
+	*c = RequiredCheck{Invalid: true}
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	var raw struct {
+		Workflow string `yaml:"workflow"`
+		Name     string `yaml:"name"`
+	}
+	if err := n.Decode(&raw); err != nil {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if k := n.Content[i].Value; k != "workflow" && k != "name" {
+			return nil
+		}
+	}
+	c.Workflow, c.Name = strings.TrimSpace(raw.Workflow), strings.TrimSpace(raw.Name)
+	c.Invalid = c.Workflow == "" || c.Name == ""
+	return nil
 }
 
 // Dep identifies a dependency for policy resolution.

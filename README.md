@@ -37,7 +37,7 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 | Session PRs | branch `cluster-update/session-<upgrade-id>/<topic>` (`/` cannot occur in an id, so prefixes never collide; the branch names the owning session), author `SESSION_BOT_LOGIN`; merged only by the console on the operator's click |
 | Revert PRs | branch `cluster-update/revert-<reverted PR>-<time>`, author `CONSOLE_BOT_LOGIN`; files restored to the merge's parent only if unchanged since the merge (else revert by hand); merged only by the console on the operator's click |
 | CI source | `ci_source:` in frank's `update-policy.yaml`: `github-checks` (frank: GitHub Actions on GitHub-hosted runners, not mirrored) or `gitea-statuses` (bridged Gitea statuses); unset or anything else = nothing passes |
-| Required CI (`github-checks`) | `required_ci_checks:` — check-run names that must ALL be `completed`/`success` on the exact head SHA, created by the GitHub Actions app (`app.slug == github-actions`); `neutral`/`skipped` is not a pass; empty = nothing passes. Console App permissions: `checks: read`, `actions: read` (workflow runs) and `actions: write` (`rerun-failed-jobs`, the one retry) |
+| Required CI (`github-checks`) | `required_ci_checks: [{workflow: .github/workflows/<file>.yml, name: <check>}]` — every pair must pass on the exact head SHA: a `push`/`pull_request` run of that workflow file from the repo itself (no fork, no `pull_request_target`/`workflow_run`) concluded `success`, and its check-run of that name (in that run's check suite, GitHub Actions app) `completed`/`success`; `neutral`/`skipped` is not a pass; a PR touching `.github/` never passes; empty, a bare name, or any other shape = nothing passes. Console App permissions: `checks: read`, `actions: read` (workflow runs) and `actions: write` (`rerun-failed-jobs`, the one retry) |
 | Required CI (`gitea-statuses`) | `required_ci_contexts:` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` only — never by `CONSOLE_BOT_LOGIN`, even if listed; unset = nothing passes |
 | Merge approval | before every console merge (auto-merge, batch, session PR, revert) the console re-reads the required CI of the declared `ci_source` on the exact verified head SHA and posts commit status `cluster-update/approved` = `success` on it — only after every check, CI included, passed — then merges pinned to that SHA; frank's `main` ruleset requires it from the console App. A PR that failed any check never gets it |
 | Briefs | read from frank: `docs/upgrade-briefs/<type>.md`, `docs/upgrade-briefs/AGENTS.md` |
@@ -119,10 +119,16 @@ Every credential is optional; a missing one disables only what needs it.
   the operator clicks (chosen over narrowing the scope). Every merge
   re-verifies and is pinned to the verified head SHA (batch members are
   merged into the batch branch by SHA too).
-- **CI signal (`github-checks`)**: every `required_ci_checks` name needs a
-  check-run on the exact head SHA from the GitHub Actions app, completed with
-  `success`; a check-run from any other app or on an older SHA never counts.
-  A held item is diagnosed: *never ran* (no workflow run for the head;
+- **CI signal (`github-checks`)**: the app slug alone proves nothing (every
+  `GITHUB_TOKEN` check-run is `github-actions`), so each required
+  `{workflow, name}` pair is checked through its workflow run: the newest run
+  whose `path` is the declared file, on the exact head SHA, triggered by
+  `push`/`pull_request` (never `pull_request_target` or a `workflow_run`
+  chain) from the repo itself (not a fork), concluded `success`; and in that
+  run's check suite (latest attempt — never another run's check-run) the
+  named check-run completed `success`. A check-run with no matching workflow
+  run is ignored. A head that changes anything under `.github/` ran CI it
+  wrote itself and never passes. A held item is diagnosed: *never ran* (no workflow run for the head;
   `mergeable` checked first) → Renovate's rebase checkbox; *ran and failed*
   → GitHub `rerun-failed-jobs` for that run (one retry, then `failed — CI`);
   *ran, result missing* (runs concluded, a required check-run absent,

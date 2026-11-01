@@ -207,7 +207,7 @@ func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 				req := a.ciRequirement(a.enginePolicy())
 				switch {
 				case req.Source == cidiag.SourceGitHubChecks && a.GitHub != nil:
-					return cidiag.DiagnoseChecks(ctx, a.GitHub, pr, req)
+					return cidiag.DiagnoseChecks(ctx, a.GitHub, pr, req, a.Cfg.FrankRepo)
 				case req.Source == cidiag.SourceGiteaStatuses && a.Diag != nil:
 					return cidiag.Diagnose(ctx, a.Diag, pr, web)
 				}
@@ -269,8 +269,10 @@ func (a *App) headPushedAt(ctx context.Context, p forge.PR, cache map[string]tim
 // console must never satisfy its own CI gate (its re-forwards are only a
 // visible copy for the PR page).
 func (a *App) ciRequirement(p frankrepo.Policy) cidiag.Requirement {
-	req := cidiag.Requirement{Source: p.CISource, Checks: append([]string(nil), p.RequiredCIChecks...),
-		Contexts: p.RequiredCIContexts, Creators: append([]string(nil), a.Cfg.StatusCreators...)}
+	req := cidiag.Requirement{Source: p.CISource, Contexts: p.RequiredCIContexts, Creators: append([]string(nil), a.Cfg.StatusCreators...)}
+	for _, c := range p.RequiredCIChecks {
+		req.Checks = append(req.Checks, cidiag.CheckRef{Workflow: c.Workflow, Name: c.Name, Invalid: c.Invalid})
+	}
 	if a.Cfg.ConsoleBot != "" {
 		req.Excluded = []string{a.Cfg.ConsoleBot}
 	}
@@ -287,11 +289,11 @@ func (a *App) enginePolicy() frankrepo.Policy {
 
 type ciCache struct {
 	statuses map[string][]forge.Status
-	checks   map[string][]forge.CheckRun
+	checks   map[string]cidiag.Evidence
 }
 
 func newCICache() *ciCache {
-	return &ciCache{statuses: map[string][]forge.Status{}, checks: map[string][]forge.CheckRun{}}
+	return &ciCache{statuses: map[string][]forge.Status{}, checks: map[string]cidiag.Evidence{}}
 }
 
 // evaluateCI is the CI verdict for PR p's head under req, by the repo's
@@ -316,15 +318,35 @@ func (a *App) evaluateCI(ctx context.Context, p forge.PR, req cidiag.Requirement
 	if req.Source == cidiag.SourceGiteaStatuses {
 		return cidiag.Evaluate(st, headAt, now, a.Cfg.CITimeout, req)
 	}
-	runs, ok := c.checks[p.HeadSHA]
+	ev, ok := c.checks[p.HeadSHA]
 	if !ok {
-		var err error
-		if runs, err = a.GitHub.CheckRuns(ctx, p.HeadSHA); err != nil {
+		// The workflow that ran must be the base branch's (p4-r2b): a head
+		// that changes anything under .github/ ran CI it wrote itself.
+		base := p.BaseRef
+		if base == "" {
+			base = a.Cfg.FrankRef
+		}
+		changed, err := a.GitHub.Compare(ctx, base, p.HeadSHA)
+		if err != nil {
+			return cidiag.Pending, "diff unreadable: cannot tell whether the PR changes its own CI"
+		}
+		for _, f := range changed {
+			for _, n := range []string{f.Name, f.Previous} {
+				if strings.HasPrefix(n, ".github/") {
+					return cidiag.Pending, "the PR changes " + n + ": CI it wrote itself never passes"
+				}
+			}
+		}
+		ev = cidiag.Evidence{SHA: p.HeadSHA, Repo: a.Cfg.FrankRepo, Statuses: st}
+		if ev.CheckRuns, err = a.GitHub.CheckRuns(ctx, p.HeadSHA); err != nil {
 			return cidiag.Pending, "check-runs unreadable"
 		}
-		c.checks[p.HeadSHA] = runs
+		if ev.Workflows, err = a.GitHub.WorkflowRuns(ctx, p.HeadSHA); err != nil {
+			return cidiag.Pending, "workflow runs unreadable"
+		}
+		c.checks[p.HeadSHA] = ev
 	}
-	return cidiag.EvaluateChecks(runs, st, p.HeadSHA, headAt, now, a.Cfg.CITimeout, req)
+	return cidiag.EvaluateChecks(ev, headAt, now, a.Cfg.CITimeout, req)
 }
 
 // trusted keeps the items whose PR passes every trust condition, lists the

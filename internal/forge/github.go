@@ -248,6 +248,17 @@ type WorkflowRun struct {
 	Conclusion   string `json:"conclusion"`
 	CheckSuiteID int64  `json:"check_suite_id"`
 	RunAttempt   int    `json:"run_attempt"`
+	// Path is the workflow file the run executed (.github/workflows/x.yml).
+	Path      string    `json:"path"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// Repository is where the run lives; HeadRepository where its head
+	// commit came from (a fork differs).
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	HeadRepository struct {
+		FullName string `json:"full_name"`
+	} `json:"head_repository"`
 }
 
 // WorkflowRuns lists the GitHub Actions workflow runs for a head sha.

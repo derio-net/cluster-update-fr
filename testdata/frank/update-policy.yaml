@@ -6,8 +6,10 @@ minimum_release_age: 72h
 # gitea-statuses (required_ci_contexts). This fixture exercises the Gitea
 # path; the app tests swap in github-checks.
 ci_source: gitea-statuses
+# github-checks: (workflow file, check-run name) pairs (p4-r2b).
 required_ci_checks:
-  - "go"
+  - workflow: .github/workflows/ci.yml
+    name: go
 # Every one of these must be green, posted by the status bridge, before
 # anything merges (c1s-r3).
 required_ci_contexts:
