@@ -106,7 +106,14 @@ type Update struct {
 	// once merged. Rolled back = revert merged AND verified (c1c-r12).
 	RevertPR  int    `json:"revert_pr,omitempty"`
 	RevertSHA string `json:"revert_sha,omitempty"`
+	// OperatorMerge: the PR changes the repo's CI workflows, so only the
+	// operator merges it, on GitHub (refreshed every cycle while open).
+	OperatorMerge bool `json:"operator_merge,omitempty"`
 }
+
+// MergedByOperator is the History reason for a workflow-change PR that
+// merged on GitHub.
+const MergedByOperator = "merged by operator outside the console"
 
 // Event is one History entry.
 type Event struct {
@@ -279,6 +286,7 @@ func (s *Store) Track(u Update) {
 		if len(u.Apps) > 0 {
 			cur.Apps = u.Apps
 		}
+		cur.OperatorMerge = u.OperatorMerge
 		for _, f := range []struct {
 			dst *string
 			v   string
@@ -755,7 +763,11 @@ func (s *Store) Reconcile(in ReconcileInput) ([]Cleanup, []error) {
 					// The PR merged on GitHub even though the console held it
 					// (a person, or a batch): the reconciler records the fact,
 					// so held → merged is legal for it alone.
-					try(id, s.transitionAs(id, Merged, "reconciler", "", func(u *Update) { u.MergeSHA = sha }, u.State == Held))
+					reason := ""
+					if u.OperatorMerge {
+						reason = MergedByOperator
+					}
+					try(id, s.transitionAs(id, Merged, "reconciler", reason, func(u *Update) { u.MergeSHA = sha }, u.State == Held))
 					s.shipMembers(id)
 					continue
 				}

@@ -42,6 +42,10 @@ const (
 	Waiting Verdict = "waiting" // Renovate's release-age gate is pending
 	Failed  Verdict = "failed"
 	Missing Verdict = "missing" // no conclusive signal within the timeout
+	// WorkflowChange: the head changes the repo's own CI (.github/); no CI
+	// result it produced counts, and it is not a CI failure either — the
+	// operator merges it (p4-r2b).
+	WorkflowChange Verdict = "workflow-change"
 )
 
 // DefaultRequired is used when update-policy.yaml declares no

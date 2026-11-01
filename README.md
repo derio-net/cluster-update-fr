@@ -128,7 +128,13 @@ Every credential is optional; a missing one disables only what needs it.
   run's check suite (latest attempt — never another run's check-run) the
   named check-run completed `success`. A check-run with no matching workflow
   run is ignored. A head that changes anything under `.github/` ran CI it
-  wrote itself and never passes. A held item is diagnosed: *never ran* (no workflow run for the head;
+  wrote itself, so its CI never counts — but that is not a CI failure: the
+  item is **needs operator merge — workflow change**, listed under Needs
+  action with the PR link and the changed `.github/` files, with no console
+  merge/approve/retry button, never retried and never counted as held — CI.
+  The operator merges it on GitHub (every other trust condition still holds
+  for it to be listed); History then records "merged by operator outside the
+  console". Renovate's GitHub Actions bumps land here. A held item is diagnosed: *never ran* (no workflow run for the head;
   `mergeable` checked first) → Renovate's rebase checkbox; *ran and failed*
   → GitHub `rerun-failed-jobs` for that run (one retry, then `failed — CI`);
   *ran, result missing* (runs concluded, a required check-run absent,

@@ -205,6 +205,7 @@ type pageData struct {
 	Countdowns            []engine.Item
 	SessionItems          []engine.Item
 	HeldCI                []engine.Item
+	OperatorMerge         []engine.Item // needs operator merge — workflow change
 	Other                 []engine.Item
 }
 
@@ -214,6 +215,8 @@ func (s *server) page(name string) http.Handler {
 		d := pageData{View: s.b.View(), Page: name, User: user, CSRF: s.csrf(user), Msg: s.readFlash(w, r, user)}
 		for _, it := range d.Items {
 			switch {
+			case it.OperatorMerge():
+				d.OperatorMerge = append(d.OperatorMerge, it)
 			case it.Security:
 				d.Security = append(d.Security, it)
 			case it.State == engine.StateHeldCI || it.State == engine.StateFailedCI:

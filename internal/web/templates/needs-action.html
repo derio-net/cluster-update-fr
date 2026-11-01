@@ -46,6 +46,13 @@
 <h2>⚠️ Held — CI</h2>
 {{range .HeldCI}}{{template "item" (item . $csrf)}}{{else}}<p class="empty">Nothing is held for CI.</p>{{end}}
 
+{{if .OperatorMerge}}<h2>✋ Needs operator merge — workflow change</h2>
+<p class="meta">These PRs change the repository's own CI (<code>.github/</code>), so no CI result they produced can be trusted and the console never merges them. Review and merge on GitHub; History records the merge.</p>
+{{range .OperatorMerge}}<div class="card workflow-change">
+<div><b>{{or .PR.Title .Name}}</b>{{if .PR.Number}} <a class="meta" href="{{.PR.URL}}">#{{.PR.Number}}</a>{{end}}</div>
+<div class="meta">needs operator merge — workflow change · changes {{range $i, $f := .WorkflowFiles}}{{if $i}}, {{end}}<code>{{$f}}</code>{{end}}</div>
+</div>{{end}}{{end}}
+
 {{if .Untrusted}}<h2>🚫 Untrusted PRs — ignored</h2>
 <p class="meta">These look like dependency updates but fail the console's trust checks; the console will not act on them.</p>
 <table><tr><th>PR</th><th>Title</th><th>Author</th><th>Why ignored</th></tr>

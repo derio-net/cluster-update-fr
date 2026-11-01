@@ -50,7 +50,16 @@ const (
 	StateSession   = "needs-session" // session path
 	StateRunbook   = "runbook"       // operator-runbook path
 	StateInBatch   = "in-batch"      // part of an open console batch PR
+	// StateWorkflowChange: the PR changes the repo's own CI (.github/), so
+	// no CI result it produced can be trusted and the console never merges
+	// it: needs operator merge — workflow change. Never retried, never a CI
+	// failure.
+	StateWorkflowChange = "workflow-change"
 )
+
+// ErrOperatorMerge: the item changes the repo's CI workflows; only the
+// operator merges it, on GitHub.
+var ErrOperatorMerge = errors.New("engine: the PR changes CI workflows — needs operator merge on GitHub")
 
 // Event is one History entry produced by the engine.
 type Event struct {
@@ -117,16 +126,23 @@ type Item struct {
 	ApprovedBy string
 	Retried    bool
 	Rollback   string
+	// WorkflowFiles are the .github/ files the PR changes (OperatorMerge).
+	WorkflowFiles []string
 }
+
+// OperatorMerge: the PR changes the repo's CI workflows; the console shows
+// it (PR link, changed workflow files) but never merges, retries or
+// approves it.
+func (it Item) OperatorMerge() bool { return it.CI == cidiag.WorkflowChange }
 
 // CanApproveNow: auto-merge and batch-approve items (security or not) can be
 // approved alone, immediately.
 func (it Item) CanApproveNow() bool {
-	return it.Path == frankrepo.PathAutoMerge || it.Path == frankrepo.PathBatchApprove
+	return !it.OperatorMerge() && (it.Path == frankrepo.PathAutoMerge || it.Path == frankrepo.PathBatchApprove)
 }
 
 // NeedsSession: session-path items run as upgrade sessions.
-func (it Item) NeedsSession() bool { return it.Path == frankrepo.PathSession }
+func (it Item) NeedsSession() bool { return !it.OperatorMerge() && it.Path == frankrepo.PathSession }
 
 // Engine merges.
 type Engine struct {
@@ -328,6 +344,9 @@ func (e *Engine) classify(inv *inventory.Inventory, d renovate.Dep) (path, reaso
 }
 
 func (e *Engine) state(it Item, now time.Time) string {
+	if it.OperatorMerge() {
+		return StateWorkflowChange
+	}
 	if held, by := e.Ledger.Hold(it.ID); held {
 		_ = by
 		return StateHeld
@@ -387,7 +406,7 @@ func (e *Engine) merge(ctx context.Context, it Item, by string) error {
 func (e *Engine) Tick(ctx context.Context, items []Item) error {
 	var first error
 	for _, it := range items {
-		if it.State == StateHeld || it.Path == frankrepo.PathSession || it.Path == frankrepo.PathOperatorRunbook || it.Path == frankrepo.PathUnclassified {
+		if it.State == StateHeld || it.OperatorMerge() || it.Path == frankrepo.PathSession || it.Path == frankrepo.PathOperatorRunbook || it.Path == frankrepo.PathUnclassified {
 			continue
 		}
 		approved, by := e.Ledger.Approved(it.ID)
@@ -444,6 +463,9 @@ func (e *Engine) RetryCI(ctx context.Context, items []Item, id, by string) error
 	it, err := find(items, id)
 	if err != nil {
 		return err
+	}
+	if it.OperatorMerge() {
+		return ErrOperatorMerge
 	}
 	if e.Ledger.Retries(it.ID) > 0 {
 		return ErrRetryExhausted
@@ -536,6 +558,9 @@ func (e *Engine) ApproveBatch(ctx context.Context, items []Item, ids []string, b
 		}
 		if it.Path != frankrepo.PathBatchApprove || it.Batch {
 			return BatchResult{}, fmt.Errorf("%w: %s", ErrWrongPath, id)
+		}
+		if it.OperatorMerge() {
+			return BatchResult{}, fmt.Errorf("%w: %s", ErrOperatorMerge, id)
 		}
 		sel = append(sel, *it)
 	}

@@ -151,6 +151,61 @@ func TestCIThatThePRRewroteNeverPasses(t *testing.T) {
 	}
 }
 
+// A Renovate PR that changes .github/ (a GitHub Actions bump) is an explicit
+// operator-merge item: listed with its workflow files, never merged,
+// approved, retried or counted as a CI hold/failure; when it later merges on
+// GitHub, History says the operator merged it outside the console.
+func TestWorkflowChangeIsAnOperatorMerge(t *testing.T) {
+	now := t0
+	a, gh := checksApp(t, &now, "ci_source: github-checks")
+	gh.files = map[int][]string{7: {"apps/homepage/manifests/deployment.yaml", ciWorkflow}}
+	gh.checkRuns = map[string][]forge.CheckRun{"h7": {check(1, "go", "h7", cidiag.ActionsApp, "failure", t0)}}
+	gh.wfRuns = map[string][]forge.WorkflowRun{"h7": {ciRun(4242, ciWorkflow, "h7", "failure", t0)}}
+	var v View
+	for i := 0; i < 3; i++ {
+		now = t0.Add(time.Duration(i) * time.Hour) // well past the CI timeout
+		v = a.Cycle(context.Background())
+	}
+	it, ok := item(v, "pr-7")
+	if !ok {
+		t.Fatalf("not listed (untrusted: %+v)", v.Untrusted)
+	}
+	if it.State != engine.StateWorkflowChange || !it.OperatorMerge() || len(it.WorkflowFiles) != 1 || it.WorkflowFiles[0] != ciWorkflow {
+		t.Fatalf("item = %s %v %v (%s)", it.State, it.CI, it.WorkflowFiles, it.CIDetail)
+	}
+	if it.CanApproveNow() || it.NeedsSession() {
+		t.Error("an operator-merge item offers a console action")
+	}
+	if mergedPR(gh, 7) || len(gh.approved) != 0 || len(gh.reruns) != 0 {
+		t.Fatalf("merged=%v approved=%v reruns=%v", gh.merged, gh.approved, gh.reruns)
+	}
+	for _, e := range a.Store.History("") {
+		if strings.HasPrefix(e.Action, "ci-retry") || e.Action == "failed-ci" {
+			t.Errorf("treated as a CI failure: %+v", e)
+		}
+	}
+	if err := a.RetryCI(context.Background(), "pr-7", "derio"); err == nil {
+		t.Error("Retry CI must refuse a workflow change")
+	}
+	if err := a.MergeNow(context.Background(), "pr-7", "derio"); err == nil || mergedPR(gh, 7) {
+		t.Errorf("Merge now merged a workflow change: %v", err)
+	}
+
+	// The operator merges it on GitHub.
+	gh.mu.Lock()
+	gh.merged = append(gh.merged, 7)
+	gh.mu.Unlock()
+	now = now.Add(time.Minute)
+	a.Cycle(context.Background())
+	found := false
+	for _, e := range a.Store.History("") {
+		found = found || (e.Update == "pr-7" && e.To == "merged" && e.Reason == "merged by operator outside the console")
+	}
+	if !found {
+		t.Fatalf("History has no operator merge: %+v", a.Store.History(""))
+	}
+}
+
 // Ran and failed: ONE automatic rerun-failed-jobs; failing again after it
 // marks the item failed — CI, with no second rerun.
 func TestGitHubChecksRerunOnceThenFailed(t *testing.T) {

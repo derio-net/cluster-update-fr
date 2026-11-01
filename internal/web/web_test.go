@@ -295,6 +295,40 @@ func TestMessagesCannotBeInjectedThroughTheURL(t *testing.T) {
 	delete(jar, "derio")
 }
 
+// p4-r2b: a PR that changes .github/ is its own section with the PR link and
+// the changed workflow files — no merge, approve, session or retry button,
+// and it is not listed as held for CI.
+func TestWorkflowChangeIsAnOperatorMergeSection(t *testing.T) {
+	b, h := newServer(t)
+	it := engine.Item{ID: "pr-88", Name: "actions/checkout", From: "v4", To: "v5", Path: frankrepo.PathAutoMerge, CI: cidiag.WorkflowChange,
+		CIDetail: "changes .github/workflows/ci.yml", State: engine.StateWorkflowChange, WorkflowFiles: []string{".github/workflows/ci.yml"}}
+	it.PR = forge.PR{Number: 88, Title: "Update actions/checkout to v5", URL: "https://github.com/derio-net/frank/pull/88"}
+	b.view.Items = []engine.Item{it}
+	body := get(h, "/", "derio").Body.String()
+	i := strings.Index(body, "Needs operator merge — workflow change")
+	if i < 0 {
+		t.Fatal("no operator-merge section")
+	}
+	sec := body[i:]
+	if end := strings.Index(sec, "</div>\n</div>"); end > 0 {
+		sec = sec[:end]
+	}
+	for _, want := range []string{"https://github.com/derio-net/frank/pull/88", "#88", ".github/workflows/ci.yml"} {
+		if !strings.Contains(sec, want) {
+			t.Errorf("section missing %q", want)
+		}
+	}
+	for _, never := range []string{"Merge now", "Approve now", "Retry CI", "Start session", "/act/"} {
+		if strings.Contains(sec, never) {
+			t.Errorf("operator-merge item offers %q", never)
+		}
+	}
+	held := body[strings.Index(body, "Held — CI"):]
+	if !strings.Contains(held[:strings.Index(held, "</p>")+4], "Nothing is held for CI") {
+		t.Error("a workflow change is not a CI hold")
+	}
+}
+
 func TestNeedsActionPage(t *testing.T) {
 	_, h := newServer(t)
 	w := get(h, "/", "derio")

@@ -279,6 +279,17 @@ func (a *App) ciRequirement(p frankrepo.Policy) cidiag.Requirement {
 	return req
 }
 
+// withWorkflowFiles names, on each workflow-change item, the .github/ files
+// its head changes (shown with the PR link under Needs action).
+func withWorkflowFiles(items []engine.Item, c *ciCache) []engine.Item {
+	for i := range items {
+		if items[i].OperatorMerge() {
+			items[i].WorkflowFiles = c.workflow[items[i].PR.HeadSHA]
+		}
+	}
+	return items
+}
+
 // enginePolicy is the policy of the current engine call (set by eng).
 func (a *App) enginePolicy() frankrepo.Policy {
 	if a.engine == nil {
@@ -290,10 +301,11 @@ func (a *App) enginePolicy() frankrepo.Policy {
 type ciCache struct {
 	statuses map[string][]forge.Status
 	checks   map[string]cidiag.Evidence
+	workflow map[string][]string // head SHA → changed .github/ files
 }
 
 func newCICache() *ciCache {
-	return &ciCache{statuses: map[string][]forge.Status{}, checks: map[string]cidiag.Evidence{}}
+	return &ciCache{statuses: map[string][]forge.Status{}, checks: map[string]cidiag.Evidence{}, workflow: map[string][]string{}}
 }
 
 // evaluateCI is the CI verdict for PR p's head under req, by the repo's
@@ -318,10 +330,12 @@ func (a *App) evaluateCI(ctx context.Context, p forge.PR, req cidiag.Requirement
 	if req.Source == cidiag.SourceGiteaStatuses {
 		return cidiag.Evaluate(st, headAt, now, a.Cfg.CITimeout, req)
 	}
-	ev, ok := c.checks[p.HeadSHA]
+	// The workflow that ran must be the base branch's (p4-r2b): a head that
+	// changes anything under .github/ ran CI it wrote itself, so none of its
+	// results count. That is not a CI failure: the item becomes "needs
+	// operator merge — workflow change" (never merged, retried or alarmed).
+	wf, ok := c.workflow[p.HeadSHA]
 	if !ok {
-		// The workflow that ran must be the base branch's (p4-r2b): a head
-		// that changes anything under .github/ ran CI it wrote itself.
 		base := p.BaseRef
 		if base == "" {
 			base = a.Cfg.FrankRef
@@ -330,13 +344,22 @@ func (a *App) evaluateCI(ctx context.Context, p forge.PR, req cidiag.Requirement
 		if err != nil {
 			return cidiag.Pending, "diff unreadable: cannot tell whether the PR changes its own CI"
 		}
+		wf = []string{}
 		for _, f := range changed {
 			for _, n := range []string{f.Name, f.Previous} {
 				if strings.HasPrefix(n, ".github/") {
-					return cidiag.Pending, "the PR changes " + n + ": CI it wrote itself never passes"
+					wf = append(wf, n)
 				}
 			}
 		}
+		c.workflow[p.HeadSHA] = wf
+	}
+	if len(wf) > 0 {
+		return cidiag.WorkflowChange, "changes " + strings.Join(wf, ", ") + ": needs operator merge on GitHub — the console never merges a PR that changes its own CI"
+	}
+	ev, ok := c.checks[p.HeadSHA]
+	if !ok {
+		var err error
 		ev = cidiag.Evidence{SHA: p.HeadSHA, Repo: a.Cfg.FrankRepo, Statuses: st}
 		if ev.CheckRuns, err = a.GitHub.CheckRuns(ctx, p.HeadSHA); err != nil {
 			return cidiag.Pending, "check-runs unreadable"
@@ -376,6 +399,21 @@ func (a *App) trusted(ctx context.Context, items []engine.Item, cache map[string
 			continue
 		}
 		scope := trust.ScopeFor(it)
+		if it.OperatorMerge() {
+			// A PR changing .github/ is shown for the operator to merge on
+			// GitHub only if every other trust condition holds (author,
+			// signatures, push actor, base, no fork, files otherwise in
+			// scope). Its scope is never handed to the merge guard, so the
+			// console cannot merge it (and its CI gate refuses it too).
+			scope.Known = true
+			scope.Sensitive = append(scope.Sensitive, ".github/")
+			if err := check(it, scope); err != nil {
+				refuse(it, err)
+				continue
+			}
+			kept = append(kept, it)
+			continue
+		}
 		if err := check(it, scope); err != nil {
 			refuse(it, err)
 			continue
@@ -567,11 +605,11 @@ func (a *App) Cycle(ctx context.Context) View {
 		return a.evaluateCI(ctx, p, req, a.headPushedAt(ctx, p, pushes), now, ci)
 	}
 	trustCache := map[string]error{}
-	items, untrusted := a.trusted(ctx, e.Build(prs, verdict), trustCache)
+	items, untrusted := a.trusted(ctx, withWorkflowFiles(e.Build(prs, verdict), ci), trustCache)
 	v.Untrusted = untrusted
 	for _, it := range items {
 		u := store.Update{ID: it.ID, Title: it.PR.Title, Cluster: it.Cluster, Kind: it.Kind, Name: it.Name, From: it.From, To: it.To,
-			Path: it.Path, PR: it.PR.Number, Rollback: it.Rollback}
+			Path: it.Path, PR: it.PR.Number, Rollback: it.Rollback, OperatorMerge: it.OperatorMerge()}
 		if it.App != "" {
 			u.Apps = []string{it.App}
 		}
@@ -583,7 +621,7 @@ func (a *App) Cycle(ctx context.Context) View {
 	if err := e.Tick(ctx, items); err != nil {
 		fail("merge", err)
 	}
-	items, _ = a.trusted(ctx, e.Build(prs, verdict), trustCache) // states after this tick's merges/holds
+	items, _ = a.trusted(ctx, withWorkflowFiles(e.Build(prs, verdict), ci), trustCache) // states after this tick's merges/holds
 	v.Items = items
 	v.Suggested = engine.SuggestBatch(items)
 
