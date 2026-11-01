@@ -125,6 +125,15 @@ type Launcher struct {
 	tokens   map[string]string // in memory only; the store keeps a hash
 	warnings []string
 	alarms   []string
+	onEnd    func(id string)
+}
+
+// SetOnEnd registers a hook run after a session ended and its record is
+// gone (the app drops the session's pending merge requests — sec2-5).
+func (l *Launcher) SetOnEnd(fn func(id string)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.onEnd = fn
 }
 
 const sessionBlob = "sessions"

@@ -88,6 +88,7 @@ type App struct {
 	Log      *log.Logger
 
 	once     sync.Once
+	wireOnce sync.Once
 	outboxMu sync.Mutex // serialises outbox flushes (sends happen outside the store lock)
 	engine   *engine.Engine
 	guard    *trust.Guard
@@ -159,6 +160,7 @@ func (a *App) logf(format string, args ...any) {
 }
 
 func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
+	a.wire()
 	a.once.Do(func() {
 		a.guard = &trust.Guard{Cfg: a.trustConfig()}
 		var f engine.Forge
@@ -177,6 +179,16 @@ func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 	})
 	a.engine.Policy = policy
 	return a.engine
+}
+
+// wire connects the launcher's end hook once: whatever ends a session
+// (operator, lifecycle, finish, reconciler) drops its merge requests.
+func (a *App) wire() {
+	a.wireOnce.Do(func() {
+		if a.Launcher != nil {
+			a.Launcher.SetOnEnd(a.clearSessionPRs)
+		}
+	})
 }
 
 func (a *App) trustConfig() trust.Config {
@@ -294,6 +306,7 @@ func (a *App) View() View {
 // Cycle runs one full pass. Every source fails alone: what cannot be read
 // shows as unknown and the rest of the cycle still runs.
 func (a *App) Cycle(ctx context.Context) View {
+	a.wire()
 	now := a.now()
 	v := View{Built: now, ReportHour: a.Cfg.ReportHour}
 	fail := func(what string, err error) {

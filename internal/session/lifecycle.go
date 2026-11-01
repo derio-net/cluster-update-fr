@@ -313,7 +313,11 @@ func (l *Launcher) EndScrubbed(ctx context.Context, id, outcome, by, transcript 
 	l.mu.Lock()
 	delete(l.sets, id)
 	delete(l.tokens, id)
+	onEnd := l.onEnd
 	l.mu.Unlock()
+	if onEnd != nil {
+		onEnd(id)
+	}
 	return outcome, cerr // a foreign object under the session's name is left and reported
 }
 

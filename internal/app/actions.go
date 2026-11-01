@@ -294,6 +294,7 @@ func (a *App) StartSession(ctx context.Context, id, by string) (session.Record, 
 	if a.Launcher == nil {
 		return session.Record{}, false, ErrUnavailable
 	}
+	a.wire()
 	p, err := a.planSession(ctx, id)
 	if err != nil {
 		return session.Record{}, false, err
