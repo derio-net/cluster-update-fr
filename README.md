@@ -34,8 +34,8 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 | Session pods | namespace `upgrade-sessions`, labels `fr.run/id=<upgrade-id>`, `cluster-update.fr/type=<chart-major\|stateful\|rollouts\|frank-os\|hop-os>`, ServiceAccount `upgrade-session-<type>` (not for `hop-os`) |
 | Session objects | pod `us-<id>-<hash>`, Secrets `…-creds` / `…-brief`, all labelled `app.kubernetes.io/managed-by=cluster-update-fr`; the console writes no RoleBinding — frank pre-binds every role a session needs |
 | Session credentials | files under `SESSION_SECRET_DIR`: `github-token` (the **session** App's token, not the console's), `omni-sa-key`, `talosconfig`, `hop-talosconfig`, `hop-kubeconfig` (each type gets only its own) |
-| Session PRs | branch `cluster-update/session-<upgrade-id>-<topic>`, author `SESSION_BOT_LOGIN`; merged only by the console on the operator's click |
-| Revert PRs | branch `cluster-update/revert-<reverted PR>-<time>`, author `CONSOLE_BOT_LOGIN`; merged only by the console on the operator's click |
+| Session PRs | branch `cluster-update/session-<upgrade-id>/<topic>` (`/` cannot occur in an id, so prefixes never collide; the branch names the owning session), author `SESSION_BOT_LOGIN`; merged only by the console on the operator's click |
+| Revert PRs | branch `cluster-update/revert-<reverted PR>-<time>`, author `CONSOLE_BOT_LOGIN`; files restored to the merge's parent only if unchanged since the merge (else revert by hand); merged only by the console on the operator's click |
 | Required CI | `required_ci_contexts:` in frank's `update-policy.yaml` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` or the console bot |
 | Briefs | read from frank: `docs/upgrade-briefs/<type>.md`, `docs/upgrade-briefs/AGENTS.md` |
 | Hop scan results | VictoriaLogs lines `hop-scan result {"image","namespace","vulnerabilities":[{"id","severity","pkg","installed","fixed","title"}]}` |
@@ -102,7 +102,7 @@ Every credential is optional; a missing one disables only what needs it.
 - **PR trust** (the frank repo is public): a PR is acted on only if its author
   is the right bot for its branch — Renovate on `renovate/`, the console on
   `cluster-update/batch-` and `cluster-update/revert-<n>-`, the session App on
-  `cluster-update/session-<its id>-` — its head is in the repo, its base is
+  `cluster-update/session-<its id>/` — its head is in the repo, its base is
   `main`, every commit is GitHub-signature verified, authored by that bot's
   account and pushed by it, and every changed file lies in the dependency's
   own location. Sensitive paths (`.github/`, `scripts/`, `apps/root/`,
