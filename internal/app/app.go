@@ -728,7 +728,12 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapsho
 			}
 		}
 	}
-	for _, c := range a.Store.Reconcile(store.ReconcileInput{OpenPRs: open, MergedPRs: merged, SessionPods: pods}) {
+	cleanups, errs := a.Store.Reconcile(store.ReconcileInput{OpenPRs: open, MergedPRs: merged, SessionPods: pods})
+	for _, err := range errs {
+		a.logf("%v", err)
+		v.Errors = append(v.Errors, scrub.String(err.Error()))
+	}
+	for _, c := range cleanups {
 		switch c.Kind {
 		case store.CleanupPod:
 			if a.Launcher != nil {

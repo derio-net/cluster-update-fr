@@ -307,6 +307,12 @@ func (s *Store) Transition(id string, to State, by, reason string, with func(*Up
 }
 
 func (s *Store) transition(id string, to State, by, reason string, with func(*Update)) error {
+	return s.transitionAs(id, to, by, reason, with, false)
+}
+
+// transitionAs is transition with an override for a recorded fact the
+// state machine would otherwise refuse (the reconciler's held → merged).
+func (s *Store) transitionAs(id string, to State, by, reason string, with func(*Update), force bool) error {
 	u, ok := s.d.Updates[id]
 	if !ok {
 		return ErrUnknown
@@ -314,7 +320,7 @@ func (s *Store) transition(id string, to State, by, reason string, with func(*Up
 	if (to == Failed || to == Abandoned || to == RolledBack) && strings.TrimSpace(reason) == "" {
 		return ErrNeedsReason
 	}
-	allowed := false
+	allowed := force
 	for _, next := range legal[u.State] {
 		if next == to {
 			allowed = true
@@ -551,8 +557,9 @@ type ReconcileInput struct {
 // cleaned up: updates whose PR closed unmerged are abandoned, merged updates
 // never applied (and applied ones never verified) fail with the reason
 // named, session pods with no open update and batch branches with no open PR
-// are listed for deletion.
-func (s *Store) Reconcile(in ReconcileInput) []Cleanup {
+// are listed for deletion. Every transition it could not make is returned
+// (c1c-r4), never dropped.
+func (s *Store) Reconcile(in ReconcileInput) ([]Cleanup, []error) {
 	if in.ApplyTimeout == 0 {
 		in.ApplyTimeout = 2 * time.Hour
 	}
@@ -563,23 +570,32 @@ func (s *Store) Reconcile(in ReconcileInput) []Cleanup {
 	defer s.mu.Unlock()
 	now := s.now()
 	var out []Cleanup
+	var errs []error
+	try := func(id string, err error) {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reconcile %s: %w", id, err))
+		}
+	}
 	for id, u := range s.d.Updates {
 		switch u.State {
 		case Pending, Approved, Held:
 			if u.PR > 0 && !in.OpenPRs[u.PR] {
 				if sha, ok := in.MergedPRs[u.PR]; ok {
-					_ = s.transition(id, Merged, "reconciler", "", func(u *Update) { u.MergeSHA = sha })
+					// The PR merged on GitHub even though the console held it
+					// (a person, or a batch): the reconciler records the fact,
+					// so held → merged is legal for it alone.
+					try(id, s.transitionAs(id, Merged, "reconciler", "", func(u *Update) { u.MergeSHA = sha }, u.State == Held))
 					continue
 				}
-				_ = s.transition(id, Abandoned, "reconciler", fmt.Sprintf("PR #%d closed without merging", u.PR), nil)
+				try(id, s.transition(id, Abandoned, "reconciler", fmt.Sprintf("PR #%d closed without merging", u.PR), nil))
 			}
 		case Merged:
 			if now.Sub(u.Since) > in.ApplyTimeout {
-				_ = s.transition(id, Failed, "reconciler", fmt.Sprintf("merged but not applied after %s: ArgoCD's last sync operation never reached the merge commit — needs you", in.ApplyTimeout), nil)
+				try(id, s.transition(id, Failed, "reconciler", fmt.Sprintf("merged but not applied after %s: ArgoCD's last sync operation never reached the merge commit — needs you", in.ApplyTimeout), nil))
 			}
 		case Applied:
 			if now.Sub(u.Since) > in.VerifyTimeout {
-				_ = s.transition(id, Failed, "reconciler", fmt.Sprintf("applied but the smoke test did not pass within %s — needs you", in.VerifyTimeout), nil)
+				try(id, s.transition(id, Failed, "reconciler", fmt.Sprintf("applied but the smoke test did not pass within %s — needs you", in.VerifyTimeout), nil))
 			}
 		}
 	}
@@ -596,7 +612,8 @@ func (s *Store) Reconcile(in ReconcileInput) []Cleanup {
 		out = append(out, Cleanup{Kind: CleanupBranch, Target: b, Reason: "batch branch with no open PR"})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Target < out[j].Target })
-	return out
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Error() < errs[j].Error() })
+	return out, errs
 }
 
 // Edit mutates an update record in place (descriptive fields: transcript,

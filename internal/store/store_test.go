@@ -187,7 +187,7 @@ func TestReconcileNamesEveryLeftover(t *testing.T) {
 	_ = s.Transition("pr-2", Merged, "auto", "", func(u *Update) { u.MergeSHA = "m" })
 	s.Track(Update{ID: "pr-3", Title: "c", PR: 3, Session: "us-pr-3"}) // open PR, fine
 	now = t0.Add(5 * time.Hour)
-	out := s.Reconcile(ReconcileInput{
+	out, _ := s.Reconcile(ReconcileInput{
 		OpenPRs: map[int]bool{3: true},
 		SessionPods: []live.Pod{
 			{Namespace: "upgrade-sessions", Name: "us-gone", Labels: map[string]string{"fr.run/id": "frank-os-old"}},
@@ -217,6 +217,25 @@ func TestReconcileNamesEveryLeftover(t *testing.T) {
 	}
 }
 
+// c1c-r4: a held update whose PR got merged anyway (by hand on GitHub, or a
+// batch) becomes merged — the reconciler may do what a person may not —
+// and a transition the reconciler cannot make is reported, not dropped.
+func TestReconcileMovesHeldToMergedAndReportsErrors(t *testing.T) {
+	s, _ := open(t)
+	s.Track(Update{ID: "pr-1", Title: "a", PR: 1})
+	_ = s.Transition("pr-1", Held, "derio", "held by derio", nil)
+	if err := s.Transition("pr-1", Merged, "derio", "", nil); err == nil {
+		t.Fatal("held → merged stays illegal for everyone but the reconciler")
+	}
+	_, errs := s.Reconcile(ReconcileInput{OpenPRs: map[int]bool{}, MergedPRs: map[int]string{1: "m1"}})
+	if u, _ := s.Get("pr-1"); u.State != Merged || u.MergeSHA != "m1" {
+		t.Fatalf("held PR merged on GitHub: %+v", u)
+	}
+	if len(errs) != 0 {
+		t.Errorf("errors = %v", errs)
+	}
+}
+
 // c1c-r6: a failed update is where the operator REPAIRS it — often from its
 // session. Its pod is not reaped; only terminal states and unknown ids are.
 func TestReconcileKeepsTheSessionOfAFailedUpdate(t *testing.T) {
@@ -225,7 +244,7 @@ func TestReconcileKeepsTheSessionOfAFailedUpdate(t *testing.T) {
 	_ = s.Transition("frank-os-1", Failed, "verifier", "failed at step smoke", nil)
 	s.Track(Update{ID: "pr-4", Title: "y", PR: 4})
 	_ = s.Transition("pr-4", Abandoned, "x", "gone", nil)
-	out := s.Reconcile(ReconcileInput{OpenPRs: map[int]bool{}, SessionPods: []live.Pod{
+	out, _ := s.Reconcile(ReconcileInput{OpenPRs: map[int]bool{}, SessionPods: []live.Pod{
 		{Name: "us-repair", Labels: map[string]string{"fr.run/id": "frank-os-1"}},
 		{Name: "us-done", Labels: map[string]string{"fr.run/id": "pr-4"}},
 	}})
