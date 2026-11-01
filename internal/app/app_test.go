@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/derio-net/cluster-update-fr/internal/config"
 	"github.com/derio-net/cluster-update-fr/internal/engine"
@@ -667,6 +668,35 @@ func TestStateSurvivesARestart(t *testing.T) {
 	}
 	if _, created, err := b.StartSession(context.Background(), id, "derio"); err != nil || created {
 		t.Fatalf("re-attach after restart: created=%v err=%v", created, err)
+	}
+}
+
+// sec2-2: a session's finish outcome reaches the update (and History) only
+// redacted, and is shortened on a rune boundary.
+func TestSessionOutcomeIsScrubbedBeforeTheUpdate(t *testing.T) {
+	now := t0
+	a, _, _, _ := newApp(t, &now, false)
+	a.Cycle(context.Background())
+	const id = "frank-os-talos-1.13.4"
+	if _, _, err := a.StartSession(context.Background(), id, "derio"); err != nil {
+		t.Fatal(err)
+	}
+	tok := a.Launcher.StepToken(id)
+	outcome := "failed: the agent printed " + tok + " " + strings.Repeat("é", 400)
+	if err := a.SessionFinished(context.Background(), id, tok, outcome, ""); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := a.Store.Get(id)
+	if strings.Contains(u.Reason, tok) || u.State != store.Failed {
+		t.Fatalf("update reason holds the raw session secret or wrong state: %+v", u)
+	}
+	if !utf8.ValidString(u.Reason) {
+		t.Errorf("reason cut inside a rune: %q", u.Reason)
+	}
+	for _, e := range a.Store.History(id) {
+		if strings.Contains(e.Reason, tok) {
+			t.Errorf("History holds the raw session secret: %q", e.Reason)
+		}
 	}
 }
 

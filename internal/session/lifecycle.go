@@ -279,21 +279,29 @@ func (l *Launcher) endAlarm(ctx context.Context, r Record, kind, outcome string)
 // End deletes the session's pod and Secrets, releases its lock, and keeps
 // the outcome and the scrubbed transcript in History. Idempotent.
 func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) error {
+	_, err := l.EndScrubbed(ctx, id, outcome, by, transcript)
+	return err
+}
+
+// EndScrubbed is End, returning the outcome as it was stored — redacted
+// with the session's set under the time bound — so callers never carry the
+// raw session-supplied text any further (sec2-2).
+func (l *Launcher) EndScrubbed(ctx context.Context, id, outcome, by, transcript string) (string, error) {
 	if len(transcript) > l.transcriptMax() {
-		return fmt.Errorf("%w: %d bytes, limit %d", ErrTranscriptTooLarge, len(transcript), l.transcriptMax())
+		return "", fmt.Errorf("%w: %d bytes, limit %d", ErrTranscriptTooLarge, len(transcript), l.transcriptMax())
 	}
 	if len(outcome) > l.outcomeMax() {
-		return fmt.Errorf("%w: outcome is %d bytes, limit %d", ErrFieldTooLarge, len(outcome), l.outcomeMax())
+		return "", fmt.Errorf("%w: outcome is %d bytes, limit %d", ErrFieldTooLarge, len(outcome), l.outcomeMax())
 	}
 	rec, ok := l.Get(id)
 	set := l.Scrubber(id)
 	outcome = l.boundedScrub(set, outcome, "outcome")
 	cerr := l.cleanup(ctx, PodName(id))
 	if cerr != nil && !errors.Is(cerr, kube.ErrForbiddenWrite) {
-		return cerr // API trouble: keep the record, retry next tick
+		return outcome, cerr // API trouble: keep the record, retry next tick
 	}
 	if !ok {
-		return cerr
+		return outcome, cerr
 	}
 	Locks{Store: l.Store}.Release(rec.Target, id)
 	_ = l.update(func(m map[string]Record) error { delete(m, id); return nil })
@@ -306,7 +314,7 @@ func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) 
 	delete(l.sets, id)
 	delete(l.tokens, id)
 	l.mu.Unlock()
-	return cerr // a foreign object under the session's name is left and reported
+	return outcome, cerr // a foreign object under the session's name is left and reported
 }
 
 // ErrTranscriptTooLarge: the finish call's transcript exceeds the cap; the

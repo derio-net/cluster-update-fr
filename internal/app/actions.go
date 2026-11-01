@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/derio-net/cluster-update-fr/internal/engine"
 	"github.com/derio-net/cluster-update-fr/internal/forge"
@@ -354,6 +355,17 @@ func (a *App) EndSession(ctx context.Context, id, by string) error {
 	return err
 }
 
+// truncateRunes shortens s to at most n bytes without splitting a rune.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
 // sessionOutcome maps how a session ended onto its update (c1c-r5). Nothing
 // merged yet (pending/approved/held): a "needs you" or failed end is
 // failed (the operator must look), any other end is abandoned. Once its PR
@@ -399,13 +411,11 @@ func (a *App) SessionFinished(ctx context.Context, id, token, outcome, transcrip
 	if err := a.Launcher.StepFinished(id, token); err != nil {
 		return err
 	}
-	err := a.Launcher.End(ctx, rec.ID, outcome, "session", transcript)
+	// The launcher returns the outcome already redacted (sec2-2); only that
+	// form goes further, shortened on a rune boundary.
+	clean, err := a.Launcher.EndScrubbed(ctx, rec.ID, outcome, "session", transcript)
 	if err == nil {
-		// Session-supplied and already capped (4 KiB); shown shortened.
-		if len(outcome) > 300 {
-			outcome = outcome[:300] + "…"
-		}
-		a.sessionOutcome(id, outcome)
+		a.sessionOutcome(id, truncateRunes(clean, 300))
 	}
 	_ = a.Store.Save()
 	return err
