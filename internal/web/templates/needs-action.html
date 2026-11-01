@@ -62,6 +62,11 @@
 {{range .Sessions}}<tr><td>{{.ID}}</td><td>{{.Type}}</td><td>{{when .StartedAt}}</td><td>{{if .StepRunning}}{{.StepName}} (idle clock paused){{else}}—{{end}}</td>
 <td>{{template "btn" (btn "attach" .ID $csrf "Attach" "")}} {{template "btn" (btn "end-session" .ID $csrf "End" "danger")}}</td></tr>{{end}}</table>{{end}}
 
+{{if .Stranded}}<h2>Stranded session pods</h2>
+<p class="meta">Running with no session record after a state reset — alarmed in #security, ended on the next cycle by uid precondition.</p>
+<table><tr><th>Pod</th><th>Run</th><th>UID</th><th>Found</th></tr>
+{{range .Stranded}}<tr><td class="bad">{{.Pod}}</td><td>{{.RunID}}</td><td>{{.UID}}</td><td>{{when .Found}}</td></tr>{{end}}</table>{{end}}
+
 {{if .Alarms}}<h2>Open security alarms</h2>
 <table><tr><th>Severity</th><th>Vulnerability</th><th>Component</th><th>Fix</th><th>Deadline</th></tr>
 {{range .Alarms}}<tr><td class="{{sevclass .Severity}}">{{.Severity}}</td><td>{{.VulnID}} {{.Package}}</td><td>{{.Component}}</td><td>{{or .Fixed "none yet"}}</td><td>{{when .Deadline}}</td></tr>{{end}}</table>{{end}}

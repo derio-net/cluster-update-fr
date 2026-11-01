@@ -130,9 +130,10 @@ func view() app.View {
 			{ID: "frank/os/talos/talos", Cluster: "frank", Service: "os", Kind: "talos", Name: "talos", Declared: "1.12.6", Running: "1.12.6", Latest: "1.14.5", Gap: "2 minor", Path: "session"},
 			{ID: "hop/os/talos/talos", Cluster: "hop", Service: "os", Kind: "talos", Name: "talos", Declared: "1.12.5", Unknown: true, Path: "session"},
 		}},
-		Updates: []store.Update{{ID: "pr-1", Title: "Update grafana", State: store.Verified, Approver: "auto", PR: 1, Rollout: "operationState applied abc", Verification: "2/2 smoke checks passed"}},
-		History: []store.Event{{At: time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC), Update: "pr-1", Action: "merged", By: "auto", PR: 1, Reason: "with " + leak}},
-		Errors:  []string{"hop nodes: unreachable"},
+		Updates:  []store.Update{{ID: "pr-1", Title: "Update grafana", State: store.Verified, Approver: "auto", PR: 1, Rollout: "operationState applied abc", Verification: "2/2 smoke checks passed"}},
+		History:  []store.Event{{At: time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC), Update: "pr-1", Action: "merged", By: "auto", PR: 1, Reason: "with " + leak}},
+		Errors:   []string{"hop nodes: unreachable"},
+		Stranded: []session.Stranded{{Pod: "upgrade-session-stranded-1", UID: "uid-stranded-9", RunID: "pr-77", Found: time.Date(2026, 10, 31, 8, 0, 0, 0, time.UTC)}},
 	}
 }
 
@@ -311,7 +312,8 @@ func TestNeedsActionPage(t *testing.T) {
 		last = i
 	}
 	for _, want := range []string{"Approve now", "Approve batch", "Hold", "Merge now", "Start session", "Retry CI", "no CI status",
-		"ONE-WAY", "operator runbook", "v1.13.1", "Longhorn snapshot", "a &lt;b&gt;", "2026-11-01 10:00"} {
+		"ONE-WAY", "operator runbook", "v1.13.1", "Longhorn snapshot", "a &lt;b&gt;", "2026-11-01 10:00",
+		"Stranded session pods", "upgrade-session-stranded-1", "uid-stranded-9"} { // c1d-r9
 		if !strings.Contains(body, want) {
 			t.Errorf("Needs action missing %q", want)
 		}

@@ -125,7 +125,8 @@ type View struct {
 	Guided     []GuidedStep
 	Omni       *inventory.Dependency
 	Sessions   []session.Record
-	SessionPRs []SessionPR // session PRs waiting for the operator's merge
+	Stranded   []session.Stranded // session pods with no record after a state reset (c1d-r9)
+	SessionPRs []SessionPR        // session PRs waiting for the operator's merge
 	// DeclRevision is the frank commit the declarations were read at ("" =
 	// unknown); declOK says they loaded without error.
 	DeclRevision string
@@ -493,6 +494,7 @@ func (a *App) Cycle(ctx context.Context) View {
 		// warning is shown every cycle while it holds, not once.
 		_ = a.Launcher.Warnings()
 		v.Sessions = a.Launcher.Sessions()
+		v.Stranded = a.Launcher.Stranded()
 		for _, s := range v.Sessions {
 			if s.Warned && s.StepRunning {
 				v.Warnings = append(v.Warnings, fmt.Sprintf("session %s passed its %s maximum lifetime while step %q is running; it ends after the step (hard ceiling %s)",

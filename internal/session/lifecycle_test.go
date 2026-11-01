@@ -393,6 +393,76 @@ func TestOrphansNotReapedWhenRecordsAreUnreadable(t *testing.T) {
 	}
 }
 
+// c1d-r9: after a state reset, a running session pod with no record alarms
+// in #security once per pod, is listed, and is ended on the NEXT cycle by
+// uid precondition (a pod replaced under the same name in between is not
+// touched).
+func TestStrandedSessionPodsAfterResetAlarmOnceThenEnd(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	start(t, l, "pr-1", TypeChartMajor)
+	if _, _, err := l.Start(context.Background(), req("pr-2", TypeStateful, "gitea")); err != nil {
+		t.Fatal(err)
+	}
+	// The state is reset: the records are gone and the store warns.
+	_ = l.update(func(m map[string]Record) error { clear(m); return nil })
+	l.Store.Warning = "state file was unreadable; started empty"
+	ctx := context.Background()
+
+	if _, err := l.ReconcileOrphans(ctx); err == nil {
+		t.Fatal("a reset state reconciled orphans silently")
+	}
+	if _, ok := k.objects["pods/"+PodName("pr-1")]; !ok {
+		t.Fatal("a stranded pod was deleted in the cycle that found it")
+	}
+	st := l.Stranded()
+	if len(st) != 2 || st[0].Pod != PodName("pr-1") || st[0].UID == "" || st[1].Pod != PodName("pr-2") {
+		t.Fatalf("stranded = %+v", st)
+	}
+	if a := l.Alarms(); len(a) != 2 || !strings.Contains(a[0], "no session record") {
+		t.Fatalf("alarms = %q", a)
+	}
+	ob := store.LoadOutbox(mustRaw(t, l.Store, store.OutboxBlob))
+	if len(ob.Msgs) != 2 || !ob.Msgs[0].Security {
+		t.Fatalf("outbox = %+v", ob.Msgs)
+	}
+
+	// pr-2's pod is replaced under the same name before the next cycle.
+	newer := k.objects["pods/"+PodName("pr-2")]
+	newer["metadata"].(map[string]any)["uid"] = "uid-replaced"
+
+	_, _ = l.ReconcileOrphans(ctx)
+	for _, gone := range []string{"pods/" + PodName("pr-1"), "secrets/" + SecretName("pr-1"), "secrets/" + BriefName("pr-1")} {
+		if _, ok := k.objects[gone]; ok {
+			t.Errorf("%s survived the next cycle", gone)
+		}
+	}
+	if _, ok := k.objects["pods/"+PodName("pr-2")]; !ok {
+		t.Error("a pod replaced under the stranded name was deleted (no uid precondition)")
+	}
+	if st := l.Stranded(); len(st) != 1 || st[0].Pod != PodName("pr-2") || st[0].UID != "uid-replaced" {
+		t.Fatalf("stranded after the end cycle = %+v", st)
+	}
+	// The replacement is a different pod: it alarms once in its own right.
+	if a := l.Alarms(); len(a) != 1 {
+		t.Fatalf("alarms on the end cycle = %q", a)
+	}
+	_, _ = l.ReconcileOrphans(ctx)
+	if a := l.Alarms(); len(a) != 0 {
+		t.Fatalf("an alarm repeated: %q", a)
+	}
+	if _, ok := k.objects["pods/"+PodName("pr-2")]; ok {
+		t.Error("the replacement was not ended on the cycle after it was found")
+	}
+	if st := l.Stranded(); len(st) != 0 {
+		t.Fatalf("stranded = %+v", st)
+	}
+	if ob := store.LoadOutbox(mustRaw(t, l.Store, store.OutboxBlob)); len(ob.Msgs) != 3 {
+		t.Fatalf("outbox = %d messages, want 3", len(ob.Msgs))
+	}
+}
+
 type flakySecrets struct {
 	*fakeKube
 	code int

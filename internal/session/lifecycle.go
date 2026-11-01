@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -232,8 +233,17 @@ func (l *Launcher) ReconcileOrphans(ctx context.Context) ([]Orphan, error) {
 	recs, ok := l.recordsChecked()
 	if !ok || l.Store.Warning != "" {
 		// Fail closed (sec2-10): with no trustworthy record of the running
-		// sessions, nothing is an orphan — not a pod, Secret or lock.
-		return nil, errors.New("session records unreadable (or the state was reset); orphan reconciliation skipped")
+		// sessions, nothing is an orphan — not a pod, Secret or lock. Running
+		// session pods are handled on the slower, alarmed path instead
+		// (c1d-r9): alarmed and listed now, ended next cycle by uid.
+		msg := "session records unreadable (or the state was reset); orphan reconciliation skipped"
+		if err := l.reconcileStranded(ctx, recs); err != nil {
+			msg += "; stranded session pods: " + err.Error()
+		}
+		return nil, errors.New(msg)
+	}
+	if _, has := l.Store.RawBlob(strandedBlob); has {
+		_ = l.Store.PutBlob(strandedBlob, []Stranded{}) // trustworthy records again: orphans cover them
 	}
 	var out []Orphan
 	sel := "?labelSelector=" + url.QueryEscape(kube.ManagedByLabel+"="+kube.ManagedBy)
@@ -269,6 +279,123 @@ func (l *Launcher) ReconcileOrphans(ctx context.Context) ([]Orphan, error) {
 		}
 	}
 	return out, nil
+}
+
+const strandedBlob = "session-stranded"
+
+// Stranded is a running session pod found with no session record after a
+// state reset (c1d-r9). It is alarmed once (key: pod uid + reason), listed
+// in the console, and ended on the next cycle — by uid precondition only, so
+// an object replaced under the same name in between is never touched.
+type Stranded struct {
+	Pod        string            `json:"pod"`
+	UID        string            `json:"uid"`
+	RunID      string            `json:"run_id"`
+	SecretUIDs map[string]string `json:"secret_uids,omitempty"`
+	Found      time.Time         `json:"found"`
+}
+
+// Stranded lists the stranded session pods awaiting their end.
+func (l *Launcher) Stranded() []Stranded {
+	var st []Stranded
+	l.Store.GetBlob(strandedBlob, &st)
+	return st
+}
+
+// reconcileStranded ends the stranded pods listed on an earlier cycle, then
+// lists (and alarms) the ones found now. recs holds whatever records are
+// readable (none when they are not): a pod one of them accounts for is a
+// live session, not stranded.
+func (l *Launcher) reconcileStranded(ctx context.Context, recs map[string]Record) error {
+	accounted := map[string]bool{} // pod names a readable record holds
+	for _, r := range recs {
+		accounted[r.Pod] = true
+	}
+	var errs []string
+	listed := map[string]bool{}
+	var keep []Stranded
+	for _, s := range l.Stranded() {
+		if accounted[s.Pod] {
+			continue // a record holds it now
+		}
+		gone, err := l.endStranded(ctx, s)
+		switch {
+		case err != nil:
+			errs = append(errs, s.Pod+": "+scrub.String(err.Error()))
+			keep, listed[s.UID] = append(keep, s), true
+		case gone:
+			l.Store.AddEvent(store.Event{Update: s.RunID, Action: "cleanup", By: "reconciler",
+				Reason: "ended stranded session pod " + s.Pod + " (uid " + s.UID + "): no session record after a state reset"})
+		}
+	}
+	type item struct {
+		Metadata kube.Meta `json:"metadata"`
+	}
+	var pods, secrets struct {
+		Items []item `json:"items"`
+	}
+	sel := "?labelSelector=" + url.QueryEscape(kube.ManagedByLabel+"="+kube.ManagedBy)
+	ns := "/api/v1/namespaces/" + url.PathEscape(l.Namespace) + "/"
+	if err := l.Kube.Get(ctx, ns+"pods"+sel, &pods); err != nil {
+		errs = append(errs, "list pods: "+scrub.String(err.Error()))
+	} else if err := l.Kube.Get(ctx, ns+"secrets"+sel, &secrets); err != nil {
+		errs = append(errs, "list secrets: "+scrub.String(err.Error()))
+	} else {
+		secretUID := map[string]string{}
+		for _, s := range secrets.Items {
+			secretUID[s.Metadata.Name] = s.Metadata.UID
+		}
+		for _, p := range pods.Items {
+			m := p.Metadata
+			if m.UID == "" || listed[m.UID] || accounted[m.Name] {
+				continue
+			}
+			s := Stranded{Pod: m.Name, UID: m.UID, RunID: m.Labels[LabelRunID], Found: l.Now()}
+			for _, n := range []string{m.Name + "-creds", m.Name + "-brief"} {
+				if uid := secretUID[n]; uid != "" {
+					if s.SecretUIDs == nil {
+						s.SecretUIDs = map[string]string{}
+					}
+					s.SecretUIDs[n] = uid
+				}
+			}
+			keep, listed[m.UID] = append(keep, s), true
+			l.alarm(alarmKey("stranded:"+m.Name, "stranded-pod", m.UID, "no-session-record"),
+				fmt.Sprintf("session pod %s (run %s, uid %s) is running with no session record after a state reset; it is ended on the next cycle by uid precondition", m.Name, s.RunID, m.UID))
+		}
+	}
+	sort.Slice(keep, func(i, j int) bool { return keep[i].Pod < keep[j].Pod })
+	if keep == nil {
+		keep = []Stranded{}
+	}
+	if err := l.Store.PutBlob(strandedBlob, keep); err != nil {
+		errs = append(errs, "save: "+err.Error())
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// endStranded deletes a stranded pod and its Secrets by uid precondition
+// (the c1d-r1 path) — never by name alone. gone reports the pod was ours and
+// is now deleted; a pod replaced under the name (uid conflict) is left alone
+// and reports gone=false (the replacement is found and alarmed in its own
+// right).
+func (l *Launcher) endStranded(ctx context.Context, s Stranded) (gone bool, err error) {
+	switch err := l.Kube.DeleteUID(ctx, l.Namespace, "pods", s.Pod, s.UID); {
+	case err == nil, kube.IsNotFound(err):
+	case kube.IsConflict(err):
+		return false, nil
+	default:
+		return false, err
+	}
+	for name, uid := range s.SecretUIDs {
+		if err := l.Kube.DeleteUID(ctx, l.Namespace, "secrets", name, uid); err != nil && !kube.IsNotFound(err) && !kube.IsConflict(err) {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // RegisterCredentials adds every file under CredDir (whatever its name, so a
