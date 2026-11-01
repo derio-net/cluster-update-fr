@@ -2,6 +2,7 @@ package scrub
 
 import (
 	"container/heap"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -124,14 +125,6 @@ func capAt(s, c, n int) int {
 	return n
 }
 
-// lineEnd is the index of the next '\n' at or after i (or len(text)).
-func lineEnd(text string, i int) int {
-	if j := strings.IndexByte(text[i:], '\n'); j >= 0 {
-		return i + j
-	}
-	return len(text)
-}
-
 // reachRun: a token is one run of non-space bytes.
 func reachRun(text string, s int) (int, bool) {
 	lim := capAt(s, windowCap, len(text))
@@ -207,7 +200,11 @@ func reachKV(text string, s int) (int, bool) {
 }
 
 // reachFar: a PEM block spans lines.
-func reachFar(text string, s int) (int, bool) { return capAt(s, pemCap, len(text)), false }
+// capped when pemCap cut the window (the block may be longer).
+func reachFar(text string, s int) (int, bool) {
+	lim := capAt(s, pemCap, len(text))
+	return lim, lim < len(text)
+}
 
 type candidate struct {
 	hit
@@ -274,7 +271,9 @@ func spans(text string, skipCodeNoise bool, deadline time.Time) (out []hit, limi
 	}
 	n := len(text)
 	budget := workBudget(n)
+	li := newLineIndex(text)
 	var cands []candidate
+	var closed []hit // fail-closed regions found while matching
 	undecided := -1
 	for i, st := range starts {
 		s := st.pos
@@ -294,11 +293,27 @@ func spans(text string, skipCodeNoise bool, deadline time.Time) (out []hit, limi
 			}
 			m := p.re.FindStringSubmatchIndex(text[s:w])
 			if m == nil || m[2] < 0 {
+				if p.kind == "private-key" && privateHeader.MatchString(text[s:capAt(s, 128, n)]) {
+					// A private-key header whose END is not inside the window
+					// (missing, or the block is longer than pemCap): fail
+					// closed from the header to the window end — or, when the
+					// cap cut it, to a later END line if there is one.
+					e := li.end(w)
+					if capped {
+						j := strings.Index(text[w:], "-----END ")
+						if j < 0 {
+							j = n - w
+						}
+						budget -= j
+						e = li.end(capAt(w, j, n))
+					}
+					closed = append(closed, hit{s, e, limitKind})
+				}
 				continue
 			}
 			cs, ce := s+m[2], s+m[3]
 			if capped && ce == w {
-				ce = lineEnd(text, w) // filled a capped window: fail closed to the line end
+				ce = li.end(w) // filled a capped window: fail closed to the line end
 			}
 			for p.trimRight != "" && ce > cs && strings.IndexByte(p.trimRight, text[ce-1]) >= 0 {
 				ce--
@@ -317,12 +332,46 @@ func spans(text string, skipCodeNoise bool, deadline time.Time) (out []hit, limi
 			break
 		}
 	}
-	acc := accept(cands)
+	acc := append(accept(cands), closed...)
+	if len(closed) > 0 {
+		limited = true
+	}
 	if undecided >= 0 {
-		acc = append(acc, closedRegions(text, positions(starts[undecided:]))...)
+		acc = append(acc, closedRegions(text, positions(starts[undecided:]), li, deadline)...)
 		limited = true
 	}
 	return merge(acc), limited
+}
+
+var privateHeader = regexp.MustCompile(`^-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----\s`) // a real header line: body follows on the next line
+
+// lineIndex holds every '\n' position (one linear pass), so a line end is a
+// binary search, never a rescan of a long line per start.
+type lineIndex struct {
+	nl []int
+	n  int
+}
+
+func newLineIndex(text string) lineIndex {
+	li := lineIndex{n: len(text)}
+	for i := 0; i < len(text); {
+		j := strings.IndexByte(text[i:], '\n')
+		if j < 0 {
+			break
+		}
+		li.nl = append(li.nl, i+j)
+		i += j + 1
+	}
+	return li
+}
+
+// end is the index of the first '\n' at or after i (or the text length).
+func (li lineIndex) end(i int) int {
+	k := sort.SearchInts(li.nl, i)
+	if k < len(li.nl) {
+		return li.nl[k]
+	}
+	return li.n
 }
 
 // accept decides candidates in start order against every span accepted so
@@ -396,20 +445,32 @@ func accept(cands []candidate) []hit {
 }
 
 // closedRegions: for every undecided start, the region a match from it could
-// cover (its window cap, extended to the line end) — linear, merged.
-func closedRegions(text string, starts []int) []hit {
+// cover (its window cap, extended to the line end) — linear, merged. Past
+// the deadline even this stops: everything from the current start to the
+// end of the text is redacted.
+func closedRegions(text string, starts []int, li lineIndex, deadline time.Time) []hit {
 	n := len(text)
 	var out []hit
 	end := -1
-	for _, s := range starts {
+	for i, s := range starts {
+		if i%1024 == 0 && time.Now().After(deadline) {
+			if s < end {
+				s = end
+			}
+			if s < n {
+				out = append(out, hit{s, n, limitKind})
+			}
+			return out
+		}
 		c := windowCap
 		if strings.HasPrefix(text[s:], "-----BEGIN") {
 			c = pemCap
 		}
-		e := lineEnd(text, capAt(s, c, n))
-		if e <= end {
-			continue
+		w := capAt(s, c, n)
+		if w <= end {
+			continue // inside the previous region: no line end needed
 		}
+		e := li.end(w)
 		if s < end {
 			s = end // contiguous with the previous region
 		}
@@ -478,7 +539,7 @@ func applyPatterns(text string, seen func(kind string), skipCodeNoise bool) stri
 		if round >= maxRounds {
 			// Still finding secrets after the round cap: fail closed over
 			// every start that remains.
-			redact(merge(closedRegions(text, positions(startPositions(text)))))
+			redact(merge(closedRegions(text, positions(startPositions(text)), newLineIndex(text), deadline)))
 			seen(limitKind)
 			return text
 		}
