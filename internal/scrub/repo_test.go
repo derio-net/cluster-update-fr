@@ -50,6 +50,14 @@ func TestRepositoryHoldsNoTokens(t *testing.T) {
 			// kind is excused, only in this file — a real token shape still fails.
 			found = without(found, limitKind)
 		}
+		if rel, _ := filepath.Rel(root, path); filepath.Dir(rel) == filepath.Join("testdata", "podspec") {
+			// Golden pod specs (generated from podSpec, copied by frank): their
+			// Secret volume items name each credential file in a key field, which
+			// the key/value pattern takes for a value. They carry key NAMES only
+			// (internal/session renders them with empty data); every other kind
+			// still fails.
+			found = without(found, "yaml-secret")
+		}
 		if len(found) != 0 {
 			rel, _ := filepath.Rel(root, path)
 			t.Errorf("%s contains token-shaped strings: %v", rel, found)
