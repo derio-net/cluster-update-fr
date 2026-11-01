@@ -486,11 +486,19 @@ func commitTrusted(cm forge.Commit, authors, webCommitters map[string]bool) erro
 // ErrNoScope: the PR was never verified in a cycle.
 var ErrNoScope = errors.New("trust: PR was not verified; refusing to merge")
 
+// ApprovedContext is the commit status frank's main ruleset requires from
+// the console App before any merge.
+const ApprovedContext = "cluster-update/approved"
+
 // Guard re-verifies a PR right before merging it and pins the head SHA.
 type Guard struct {
 	Cfg   Config
 	API   API
 	Merge func(ctx context.Context, n int, sha string) (string, error)
+	// Approve posts ApprovedContext = success on sha. It is called only
+	// after every merge-time check passed, on the exact verified head, right
+	// before the pinned merge; a nil Approve or a failed post is no merge.
+	Approve func(ctx context.Context, sha string) error
 
 	mu     sync.Mutex
 	scopes map[int]Scope
@@ -530,6 +538,12 @@ func (g *Guard) MergeWithScope(ctx context.Context, n int, sha string, scope Sco
 	}
 	if err := g.Cfg.Check(ctx, g.API, pr, scope); err != nil {
 		return "", fmt.Errorf("trust: %w", err)
+	}
+	if g.Approve == nil {
+		return "", errors.New("trust: no approval poster configured; refusing to merge")
+	}
+	if err := g.Approve(ctx, sha); err != nil {
+		return "", fmt.Errorf("trust: posting %s on %.8s: %w", ApprovedContext, sha, err)
 	}
 	return g.Merge(ctx, n, sha)
 }

@@ -46,6 +46,7 @@ type GitHubAPI interface {
 	HasOpenPR(ctx context.Context, branch string) (bool, error)
 	DeleteBranch(ctx context.Context, branch string) error
 	LastPush(ctx context.Context, branch string) (forge.Push, error)
+	CreateStatus(ctx context.Context, sha string, s forge.Status) error
 }
 
 // guardedForge routes every merge through the trust guard (re-verify, pin
@@ -172,6 +173,14 @@ func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 		var f engine.Forge
 		if a.GitHub != nil {
 			a.guard.API, a.guard.Merge = a.GitHub, a.GitHub.Merge
+			// frank's main ruleset requires cluster-update/approved from the
+			// console App: posted by the guard only after every merge-time
+			// check passed, on the exact SHA the merge is then pinned to.
+			gh := a.GitHub
+			a.guard.Approve = func(ctx context.Context, sha string) error {
+				return gh.CreateStatus(ctx, sha, forge.Status{Context: trust.ApprovedContext, State: "success",
+					Description: "verified by cluster-update-fr at this SHA"})
+			}
 			f = guardedForge{GitHubAPI: a.GitHub, guard: a.guard}
 		}
 		a.engine = &engine.Engine{Forge: f, Ledger: a.Store, Now: a.now}

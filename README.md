@@ -37,6 +37,7 @@ in derio-net/frank; deployment lives in frank (`apps/cluster-update-fr/`).
 | Session PRs | branch `cluster-update/session-<upgrade-id>/<topic>` (`/` cannot occur in an id, so prefixes never collide; the branch names the owning session), author `SESSION_BOT_LOGIN`; merged only by the console on the operator's click |
 | Revert PRs | branch `cluster-update/revert-<reverted PR>-<time>`, author `CONSOLE_BOT_LOGIN`; files restored to the merge's parent only if unchanged since the merge (else revert by hand); merged only by the console on the operator's click |
 | Required CI | `required_ci_contexts:` in frank's `update-policy.yaml` (exact contexts or `prefix*`; default `gitea-actions/*`), statuses posted by `STATUS_CREATOR_LOGINS` only — never by `CONSOLE_BOT_LOGIN`, even if listed; unset = nothing passes |
+| Merge approval | before every console merge (auto-merge, batch, session PR, revert) the console posts commit status `cluster-update/approved` = `success` on the exact verified head SHA — only after every check passed — then merges pinned to that SHA; frank's `main` ruleset requires it from the console App. A PR that failed any check never gets it |
 | Briefs | read from frank: `docs/upgrade-briefs/<type>.md`, `docs/upgrade-briefs/AGENTS.md` |
 | Hop scan results | VictoriaLogs lines `hop-scan result {"image","namespace","vulnerabilities":[{"id","severity","pkg","installed","fixed","title"}]}` |
 | Omni version | JSON file (`OMNI_STATUS_FILE`) `{"version": "..."}` or `omnictl get sysversion -o json` output, written by a Reader-SA sidecar |

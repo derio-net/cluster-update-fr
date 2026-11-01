@@ -408,22 +408,49 @@ func TestGuardedMergeRechecks(t *testing.T) {
 	ctx := context.Background()
 	pr := goodPR(7)
 	a := api(7, pr, botCommit, []string{"apps/homepage/x.yaml"})
-	var merged []string
+	var merged, approved, order []string
 	g := &Guard{Cfg: cfg(), API: a, Merge: func(_ context.Context, n int, sha string) (string, error) {
 		merged = append(merged, sha)
+		order = append(order, "merge")
 		return "m", nil
+	}, Approve: func(_ context.Context, sha string) error {
+		approved = append(approved, sha)
+		order = append(order, "approve")
+		return nil
 	}}
 	g.SetScopes(map[int]Scope{7: ScopeFor(homepage())})
 	if _, err := g.MergePR(ctx, 7, "head"); err != nil || len(merged) != 1 || merged[0] != "head" {
 		t.Fatalf("merge: %v %v", err, merged)
 	}
+	// frank's ruleset: cluster-update/approved on the exact merged SHA,
+	// posted after every check and before the merge.
+	if len(approved) != 1 || approved[0] != "head" || strings.Join(order, ",") != "approve,merge" {
+		t.Fatalf("approved %v, order %v", approved, order)
+	}
+	// An untrusted commit on the same head name: no approval, no merge.
+	a.commits[7] = append(a.commits[7], signed("head", "mallory", "mallory"))
+	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(approved) != 1 || len(merged) != 1 {
+		t.Fatalf("a PR failing the trust check was approved/merged: %v %v %v", err, approved, merged)
+	}
+	a.commits[7] = a.commits[7][:len(a.commits[7])-1]
+	// Approval cannot be posted: no merge (the ruleset would refuse anyway).
+	g.Approve = func(context.Context, string) error { return errors.New("statuses: 502") }
+	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(merged) != 1 {
+		t.Fatalf("merged without an approval: %v %v", err, merged)
+	}
+	// No approval poster wired: fail closed.
+	g.Approve = nil
+	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(merged) != 1 {
+		t.Fatalf("merged with no approval poster: %v %v", err, merged)
+	}
+	g.Approve = func(_ context.Context, sha string) error { approved = append(approved, sha); return nil }
 	// A human pushes between build and merge.
 	a.commits[7] = append(a.commits[7], signed("evil", "mallory", "mallory"))
 	p := a.prs[7]
 	p.HeadSHA = "evil"
 	a.prs[7] = p
-	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(merged) != 1 {
-		t.Fatalf("moved head was merged: %v %v", err, merged)
+	if _, err := g.MergePR(ctx, 7, "head"); err == nil || len(merged) != 1 || len(approved) != 1 {
+		t.Fatalf("moved head was approved/merged: %v %v %v", err, merged, approved)
 	}
 	if _, err := g.MergePR(ctx, 9, "x"); !errors.Is(err, ErrNoScope) {
 		t.Errorf("an item never verified cannot be merged: %v", err)

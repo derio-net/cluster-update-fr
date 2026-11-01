@@ -22,6 +22,7 @@ import (
 	"github.com/derio-net/cluster-update-fr/internal/kube"
 	"github.com/derio-net/cluster-update-fr/internal/session"
 	"github.com/derio-net/cluster-update-fr/internal/store"
+	"github.com/derio-net/cluster-update-fr/internal/trust"
 	"github.com/derio-net/cluster-update-fr/internal/verify"
 )
 
@@ -77,6 +78,10 @@ type fakeGitHub struct {
 	openErr   bool
 	openHeads map[string]bool
 	headErr   bool
+	// mergedSHAs: the SHA each merge was pinned to; approved: SHAs the
+	// console posted cluster-update/approved=success on.
+	mergedSHAs []string
+	approved   []string
 }
 
 func (g *fakeGitHub) HasOpenPR(_ context.Context, branch string) (bool, error) {
@@ -224,11 +229,22 @@ func (g *fakeGitHub) Releases(_ context.Context, repo string) ([]string, error) 
 	}
 	return []string{"v1.13.1"}, nil
 }
-func (g *fakeGitHub) Merge(_ context.Context, n int, _ string) (string, error) {
+func (g *fakeGitHub) Merge(_ context.Context, n int, sha string) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.merged = append(g.merged, n)
+	g.mergedSHAs = append(g.mergedSHAs, sha)
 	return fmt.Sprintf("merge-%d", n), nil
+}
+
+// CreateStatus records the console's cluster-update/approved posts (sha).
+func (g *fakeGitHub) CreateStatus(_ context.Context, sha string, s forge.Status) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if s.Context == trust.ApprovedContext && s.State == "success" {
+		g.approved = append(g.approved, sha)
+	}
+	return nil
 }
 func (g *fakeGitHub) CreateBranch(context.Context, string, string) error        { return nil }
 func (g *fakeGitHub) MergeBranch(context.Context, string, string, string) error { return nil }
@@ -408,6 +424,10 @@ func TestCycleEndToEnd(t *testing.T) {
 	// The countdown elapsed and CI passed: the console merged the patch.
 	if len(gh.merged) != 1 || gh.merged[0] != 7 {
 		t.Fatalf("merged = %v", gh.merged)
+	}
+	// frank's ruleset: approved on exactly the SHA the merge was pinned to.
+	if len(gh.approved) != 1 || gh.approved[0] != gh.mergedSHAs[0] || gh.approved[0] == "" {
+		t.Fatalf("approved %v, merged at %v", gh.approved, gh.mergedSHAs)
 	}
 	u, ok := a.Store.Get("pr-7")
 	if !ok || u.State != store.Merged || u.Approver != "auto" {
@@ -643,9 +663,14 @@ func TestSessionPRMergeRoute(t *testing.T) {
 			err = a.MergeSessionPR(context.Background(), v.SessionPRs[0].Key(), "derio")
 			gh.mu.Lock()
 			merged := len(gh.merged) > 0 && gh.merged[len(gh.merged)-1] == n
+			approvedHead := len(gh.approved) > 0 && gh.approved[len(gh.approved)-1] == p.HeadSHA
+			pinned := merged && gh.mergedSHAs[len(gh.mergedSHAs)-1] == p.HeadSHA
 			gh.mu.Unlock()
 			if c.wantTrusted != (err == nil && merged) {
 				t.Fatalf("merge: err=%v merged=%v", err, merged)
+			}
+			if c.wantTrusted != (approvedHead && pinned) {
+				t.Fatalf("approved %v (head %s), pinned %v", gh.approved, p.HeadSHA, pinned)
 			}
 			if c.wantTrusted {
 				u, _ := a.Store.Get(id)
@@ -798,6 +823,9 @@ func TestUnreadablePolicyMergesNothing(t *testing.T) {
 	v := a.Cycle(context.Background())
 	if mergedPR(gh, 7) {
 		t.Fatal("merged with the update policy unreadable")
+	}
+	if len(gh.approved) != 0 {
+		t.Fatalf("approved a PR whose CI cannot pass: %v", gh.approved)
 	}
 	for _, it := range v.Items {
 		if it.CI == "passed" || !strings.Contains(it.CIDetail, "policy unreadable") {
@@ -1207,6 +1235,9 @@ func TestUntrustedPRsAreNeverItems(t *testing.T) {
 	if len(gh.merged) != 0 {
 		t.Fatalf("merged an untrusted PR: %v", gh.merged)
 	}
+	if len(gh.approved) != 0 {
+		t.Fatalf("approved an untrusted PR: %v", gh.approved)
+	}
 	reasons := map[int]string{}
 	for _, u := range v.Untrusted {
 		reasons[u.Number] = u.Reason
@@ -1228,6 +1259,9 @@ func TestHeadMovingBetweenVerifyAndMergeAborts(t *testing.T) {
 	a.Cycle(context.Background())
 	if len(gh.merged) != 0 {
 		t.Fatalf("merged although the head moved: %v", gh.merged)
+	}
+	if len(gh.approved) != 0 {
+		t.Fatalf("approved although the head moved: %v", gh.approved)
 	}
 	refused := false
 	for _, e := range a.Store.History("pr-7") {
