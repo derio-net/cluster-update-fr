@@ -51,7 +51,8 @@ func TestHopOSGetsAnIsolatedTailscaleSidecar(t *testing.T) {
 		t.Error("the sidecar sets command:")
 	}
 	te := envOf(ts)
-	for k, v := range map[string]string{"TS_USERSPACE": "true", "TS_SOCKS5_SERVER": "localhost:1055", "TS_STATE_DIR": "/ts-state", "TS_KUBE_SECRET": ""} {
+	for k, v := range map[string]string{"TS_USERSPACE": "true", "TS_SOCKS5_SERVER": "localhost:1055", "TS_OUTBOUND_HTTP_PROXY_LISTEN": "localhost:1056",
+		"TS_STATE_DIR": "/ts-state", "TS_KUBE_SECRET": ""} {
 		if te[k] == nil || te[k]["value"] != v {
 			t.Errorf("sidecar %s = %v", k, te[k])
 		}
@@ -77,13 +78,21 @@ func TestHopOSGetsAnIsolatedTailscaleSidecar(t *testing.T) {
 		t.Error("the agent container mounts the tailscale state")
 	}
 	ae := envOf(agent)
-	for _, k := range []string{"ALL_PROXY", "HTTPS_PROXY"} {
-		if ae[k] == nil || ae[k]["value"] != "socks5://localhost:1055" {
-			t.Errorf("agent %s = %v", k, ae[k])
+	// p5-r4: talosctl (grpc-go) and Claude Code (Node) speak only HTTP
+	// CONNECT through HTTPS_PROXY — neither supports SOCKS — so HTTPS_PROXY is
+	// the sidecar's HTTP CONNECT proxy; ALL_PROXY keeps the SOCKS5 one for
+	// the tools that honour it (curl); kubectl uses the kubeconfig's
+	// proxy-url (socks5).
+	for k, v := range map[string]string{"HTTPS_PROXY": "http://localhost:1056", "ALL_PROXY": "socks5://localhost:1055"} {
+		if ae[k] == nil || ae[k]["value"] != v {
+			t.Errorf("agent %s = %v, want %s", k, ae[k], v)
 		}
 	}
-	if ae["NO_PROXY"] == nil || !strings.Contains(ae["NO_PROXY"]["value"].(string), "cluster-update-fr.cluster-update.svc") {
-		t.Errorf("NO_PROXY must keep the console API off the proxy: %v", ae["NO_PROXY"])
+	np, _ := ae["NO_PROXY"]["value"].(string)
+	for _, host := range []string{"cluster-update-fr.cluster-update.svc", ".anthropic.com", "github.com", "localhost"} {
+		if !strings.Contains(np, host) {
+			t.Errorf("NO_PROXY %q must keep %s off the tailnet proxy", np, host)
+		}
 	}
 	// The auth key is in the Secret but NOT projected into the agent's volume.
 	for _, v := range spec["volumes"].([]any) {

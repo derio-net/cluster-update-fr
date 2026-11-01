@@ -59,12 +59,17 @@ const TailscaleAuthKey = "tailscale-authkey"
 // can tell an upgrade session from the scanner), with its own uid and state
 // volume.
 const (
-	TailscaleSOCKS      = "localhost:1055"
-	TailscaleProxyURL   = "socks5://" + TailscaleSOCKS
-	DefaultTailscaleTag = "tag:frank-session"
-	ScannerTailscaleTag = "tag:frank-updater"
-	TailscaleUID        = 65531
-	DefaultLoginServer  = "https://headscale.hop.derio.net"
+	TailscaleSOCKS    = "localhost:1055"
+	TailscaleProxyURL = "socks5://" + TailscaleSOCKS
+	// TailscaleHTTPProxy is the sidecar's HTTP CONNECT proxy (tailscaled
+	// --outbound-http-proxy-listen): what grpc-go (talosctl) and Claude Code
+	// can use, since neither speaks SOCKS.
+	TailscaleHTTPProxy    = "localhost:1056"
+	TailscaleHTTPProxyURL = "http://" + TailscaleHTTPProxy
+	DefaultTailscaleTag   = "tag:frank-session"
+	ScannerTailscaleTag   = "tag:frank-updater"
+	TailscaleUID          = 65531
+	DefaultLoginServer    = "https://headscale.hop.derio.net"
 )
 
 var (
@@ -769,9 +774,12 @@ func minorOf(version string, allowed map[string]bool, def string) string {
 	return def
 }
 
-// noProxy keeps the console's own session API off the tailnet proxy.
+// noProxy keeps everything but Hop off the tailnet proxy: the console's own
+// session API and cluster services, and the Claude API and GitHub (Claude
+// Code and gh honour HTTPS_PROXY; they must not depend on the sidecar).
 func noProxy(consoleURL string) string {
-	hosts := []string{"localhost", "127.0.0.1", ".svc", ".cluster.local"}
+	hosts := []string{"localhost", "127.0.0.1", ".svc", ".cluster.local",
+		".anthropic.com", ".claude.ai", ".claude.com", "github.com", ".github.com", ".githubusercontent.com"}
 	if u, err := url.Parse(consoleURL); err == nil && u.Hostname() != "" {
 		hosts = append(hosts, u.Hostname())
 	}
@@ -795,12 +803,16 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string, d
 	}
 	hop := req.Type == TypeHopOS
 	if hop {
-		// The agent reaches Hop only through the sidecar's SOCKS5: the hop
-		// kubeconfig names proxy-url socks5://localhost:1055; talosctl (gRPC)
-		// honours ALL_PROXY / HTTPS_PROXY.
+		// The agent reaches Hop only through the sidecar (p5-r4):
+		//   kubectl   — the hop kubeconfig's proxy-url socks5://localhost:1055
+		//   talosctl  — grpc-go: HTTP CONNECT via HTTPS_PROXY only (no SOCKS,
+		//               no https:// proxy), so HTTPS_PROXY=http://localhost:1056
+		//   claude/gh — Node / Go HTTP: HTTPS_PROXY (Claude Code has no SOCKS
+		//               support); NO_PROXY keeps their own APIs direct
+		//   curl etc. — ALL_PROXY socks5://localhost:1055
 		env = append(env,
+			map[string]any{"name": "HTTPS_PROXY", "value": TailscaleHTTPProxyURL},
 			map[string]any{"name": "ALL_PROXY", "value": TailscaleProxyURL},
-			map[string]any{"name": "HTTPS_PROXY", "value": TailscaleProxyURL},
 			map[string]any{"name": "NO_PROXY", "value": noProxy(l.ConsoleURL)})
 	}
 	// The creds volume projects only the agent's keys: the tailscale auth
@@ -868,6 +880,7 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string, d
 				{"name": "TS_SOCKET", "value": "/ts-state/tailscaled.sock"},
 				{"name": "TS_KUBE_SECRET", "value": ""},
 				{"name": "TS_SOCKS5_SERVER", "value": TailscaleSOCKS},
+				{"name": "TS_OUTBOUND_HTTP_PROXY_LISTEN", "value": TailscaleHTTPProxy},
 				{"name": "TS_AUTHKEY", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": SecretName(req.UpgradeID), "key": TailscaleAuthKey}}},
 				{"name": "TS_EXTRA_ARGS", "value": "--login-server=" + login + " --hostname=frank-upgrade-" + req.UpgradeID + " --advertise-tags=" + tag},
 			},

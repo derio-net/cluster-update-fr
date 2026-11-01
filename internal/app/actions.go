@@ -278,10 +278,14 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 	fmt.Fprintf(&b, "- **Rollback:** %s\n\n", rollback)
 	if typ == session.TypeHopOS {
 		fmt.Fprintf(&b, "## Reaching Hop\n\nHop is reached only over the tailnet, through this pod's tailscale sidecar "+
-			"(SOCKS5 on `%s`, joined as `%s`). The environment already sets `ALL_PROXY` and `HTTPS_PROXY` to `%s` "+
-			"(talosctl honours them) and `NO_PROXY` for the console API. The hop kubeconfig in `$CREDENTIALS_DIR/hop-kubeconfig` "+
-			"names `proxy-url: %s`, so kubectl needs nothing else. If Hop is unreachable, wait for the sidecar to join; never work around it.\n\n",
-			session.TailscaleSOCKS, a.Launcher.SessionTag(), session.TailscaleProxyURL, session.TailscaleProxyURL)
+			"(joined as `%s`), which offers two proxies:\n\n"+
+			"| Tool | Proxy it uses | Set by |\n|---|---|---|\n"+
+			"| kubectl | SOCKS5 `%s` | the hop kubeconfig's `proxy-url` (`$CREDENTIALS_DIR/hop-kubeconfig`) |\n"+
+			"| talosctl (gRPC: HTTP CONNECT only, no SOCKS) | HTTP CONNECT `%s` | `HTTPS_PROXY` |\n"+
+			"| curl and other SOCKS-aware tools | SOCKS5 `%s` | `ALL_PROXY` |\n\n"+
+			"`NO_PROXY` keeps the console API, cluster services, the Claude API and GitHub direct (Claude Code does not support SOCKS and must not depend on the sidecar). "+
+			"If Hop is unreachable, wait for the sidecar to join; never work around it.\n\n",
+			a.Launcher.SessionTag(), session.TailscaleProxyURL, session.TailscaleHTTPProxyURL, session.TailscaleProxyURL)
 	}
 	fmt.Fprintf(&b, "## Pull requests: you open them, the operator merges them\n\n"+
 		"You never merge a PR (your token cannot push to `main`). Open each PR from a branch named `%s%s/<topic>`, "+
