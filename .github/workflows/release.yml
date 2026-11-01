@@ -3,13 +3,18 @@ name: release
 # Publish the image on v* tags. Frank pins ghcr.io/derio-net/cluster-update-fr
 # by bare semver (0.1.0), so `type=semver,pattern={{version}}` is the tag that
 # matters; the git tag and the commit sha are published alongside it.
+#
+# Supply chain (c1s-r7): every action is pinned by full commit SHA (the tag is
+# a comment for Renovate/humans), the Dockerfile bases are pinned by digest,
+# the image carries SLSA provenance and an SBOM attestation, and the pushed
+# digest is written into the GitHub release notes so frank can pin by digest.
 on:
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write # the release notes carrying the digest
   packages: write
 
 jobs:
@@ -19,19 +24,19 @@ jobs:
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
       - name: test
         run: go test ./...
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -39,7 +44,7 @@ jobs:
 
       - name: Derive image tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/derio-net/cluster-update-fr
           tags: |
@@ -48,9 +53,27 @@ jobs:
             type=sha
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true
+          provenance: true
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Release notes with the image digest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          notes="Image: \`ghcr.io/derio-net/cluster-update-fr@${DIGEST}\` (tag ${TAG#v}; provenance and SBOM attached)"
+          echo "$notes" >> "$GITHUB_STEP_SUMMARY"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes"
+          else
+            gh release create "$TAG" --title "$TAG" --notes "$notes"
+          fi
