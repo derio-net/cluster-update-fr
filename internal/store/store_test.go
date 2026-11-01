@@ -222,8 +222,15 @@ func TestReconcileNamesEveryLeftover(t *testing.T) {
 	_ = s.Transition("pr-2", Merged, "auto", "", func(u *Update) { u.MergeSHA = "m" })
 	s.Track(Update{ID: "pr-3", Title: "c", PR: 3, Session: "us-pr-3"}) // open PR, fine
 	now = t0.Add(5 * time.Hour)
+	// Missing from the open list alone abandons nothing (the list may have
+	// failed or been partial): only a confirmed close does.
+	_, _ = s.Reconcile(ReconcileInput{OpenPRs: map[int]bool{3: true}})
+	if u, _ := s.Get("pr-1"); u.State == Abandoned {
+		t.Fatal("abandoned on a missing entry, without a confirmed close")
+	}
 	out, _ := s.Reconcile(ReconcileInput{
-		OpenPRs: map[int]bool{3: true},
+		OpenPRs:   map[int]bool{3: true},
+		ClosedPRs: map[int]bool{1: true},
 		SessionPods: []live.Pod{
 			{Namespace: "upgrade-sessions", Name: "us-gone", Labels: map[string]string{"fr.run/id": "frank-os-old"}},
 			{Namespace: "upgrade-sessions", Name: "us-pr-3", Labels: map[string]string{"fr.run/id": "pr-3"}},

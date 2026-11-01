@@ -110,17 +110,44 @@ func (p ghPR) pr() PR {
 	return out
 }
 
-// OpenPRs lists open pull requests (first 100).
+// ErrTruncated: a listing hit its page limit; callers must not treat it as
+// complete (nothing may be deleted or abandoned because it is "missing").
+var ErrTruncated = errors.New("forge: listing truncated at its page limit")
+
+const maxPRPages = 30
+
+// OpenPRs lists ALL open pull requests (every page). A listing that would
+// need more than maxPRPages pages fails with ErrTruncated rather than
+// returning a partial list that reads as complete.
 func (g *GitHub) OpenPRs(ctx context.Context) ([]PR, error) {
+	var out []PR
+	for page := 1; ; page++ {
+		if page > maxPRPages {
+			return nil, ErrTruncated
+		}
+		var raw []ghPR
+		if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/pulls?state=open&per_page=100&page=%d", page)), nil, &raw, false); err != nil {
+			return nil, err
+		}
+		for _, p := range raw {
+			out = append(out, p.pr())
+		}
+		if len(raw) < 100 {
+			return out, nil
+		}
+	}
+}
+
+// HasOpenPR reports whether any open PR has branch as its head (asked of
+// GitHub directly, right before a destructive action).
+func (g *GitHub) HasOpenPR(ctx context.Context, branch string) (bool, error) {
+	owner, _, _ := strings.Cut(g.Repo, "/")
 	var raw []ghPR
-	if err := g.c().do(ctx, http.MethodGet, g.repo("/pulls?state=open&per_page=100"), nil, &raw, false); err != nil {
-		return nil, err
+	q := "/pulls?state=open&per_page=1&head=" + url.QueryEscape(owner+":"+branch)
+	if err := g.c().do(ctx, http.MethodGet, g.repo(q), nil, &raw, false); err != nil {
+		return false, err
 	}
-	out := make([]PR, 0, len(raw))
-	for _, p := range raw {
-		out = append(out, p.pr())
-	}
-	return out, nil
+	return len(raw) > 0, nil
 }
 
 // PR fetches one pull request, including mergeability.

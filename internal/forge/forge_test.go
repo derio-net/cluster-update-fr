@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -335,6 +336,28 @@ func TestPRProvenance(t *testing.T) {
 	fs, err := g.PRFiles(context.Background(), 7)
 	if err != nil || len(fs) != 3 {
 		t.Fatalf("files = %v %v", fs, err)
+	}
+}
+
+// sec2-1: open PRs are read page by page (a page of 100 means "ask for the
+// next"), and the per-head check asks GitHub for that exact head.
+func TestOpenPRsPaginateAndHasOpenPR(t *testing.T) {
+	var page1 []string
+	for i := 1; i <= 100; i++ {
+		page1 = append(page1, fmt.Sprintf(`{"number":%d,"head":{"ref":"renovate/x%d"}}`, i, i))
+	}
+	srv, _ := fake(t, map[string]string{
+		"GET /repos/derio-net/frank/pulls?state=open&per_page=100&page=1":                                  "[" + strings.Join(page1, ",") + "]",
+		"GET /repos/derio-net/frank/pulls?state=open&per_page=100&page=2":                                  `[{"number":101,"head":{"ref":"cluster-update/batch-1"}}]`,
+		"GET /repos/derio-net/frank/pulls?state=open&per_page=1&head=derio-net%3Acluster-update%2Fbatch-1": `[{"number":101}]`,
+	})
+	g := gh(srv, "t")
+	prs, err := g.OpenPRs(context.Background())
+	if err != nil || len(prs) != 101 || prs[100].HeadRef != "cluster-update/batch-1" {
+		t.Fatalf("OpenPRs = %d %v", len(prs), err)
+	}
+	if open, err := g.HasOpenPR(context.Background(), "cluster-update/batch-1"); err != nil || !open {
+		t.Fatalf("HasOpenPR = %v %v", open, err)
 	}
 }
 

@@ -54,6 +54,20 @@ type fakeGitHub struct {
 	restored map[string][]string
 	branches []string // console branches on GitHub
 	deleted  []string
+	// openErr fails OpenPRs; openHeads are branches GitHub reports an open
+	// PR for when asked per head; headErr fails that per-head ask.
+	openErr   bool
+	openHeads map[string]bool
+	headErr   bool
+}
+
+func (g *fakeGitHub) HasOpenPR(_ context.Context, branch string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.headErr {
+		return false, errors.New("github: 502")
+	}
+	return g.openHeads[branch], nil
 }
 
 const renovateBot = "renovate-frank[bot]"
@@ -110,6 +124,9 @@ func (g *fakeGitHub) PRFiles(_ context.Context, n int) ([]string, error) {
 func (g *fakeGitHub) OpenPRs(context.Context) ([]forge.PR, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.openErr {
+		return nil, forge.ErrTruncated
+	}
 	var out []forge.PR
 	for _, p := range g.prs {
 		gone := false
@@ -650,6 +667,29 @@ func TestStateSurvivesARestart(t *testing.T) {
 	}
 	if _, created, err := b.StartSession(context.Background(), id, "derio"); err != nil || created {
 		t.Fatalf("re-attach after restart: created=%v err=%v", created, err)
+	}
+}
+
+// sec2-1: branch cleanup fails closed — no deletion when the open-PR list
+// failed or was truncated, and none when GitHub, asked per head right
+// before the delete, reports an open PR or cannot answer.
+func TestStaleBranchCleanupFailsClosed(t *testing.T) {
+	old := engine.BatchBranchPrefix + t0.Add(-3*time.Hour).Format("20060102-150405")
+	for name, set := range map[string]func(*fakeGitHub){
+		"open-PR list failed":        func(g *fakeGitHub) { g.openErr = true },
+		"an open PR on that head":    func(g *fakeGitHub) { g.openHeads = map[string]bool{old: true} },
+		"per-head check unreachable": func(g *fakeGitHub) { g.headErr = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := t0
+			a, gh, _, _ := newApp(t, &now, false)
+			gh.branches = []string{old}
+			set(gh)
+			a.Cycle(context.Background())
+			if len(gh.deleted) != 0 {
+				t.Fatalf("deleted %v", gh.deleted)
+			}
+		})
 	}
 }
 

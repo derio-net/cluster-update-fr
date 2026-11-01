@@ -41,6 +41,7 @@ type GitHubAPI interface {
 	PRFiles(ctx context.Context, n int) ([]string, error)
 	PRPatches(ctx context.Context, n int) (map[string]forge.FilePatch, error)
 	Branches(ctx context.Context, prefix string) ([]string, error)
+	HasOpenPR(ctx context.Context, branch string) (bool, error)
 	DeleteBranch(ctx context.Context, branch string) error
 	LastPush(ctx context.Context, branch string) (forge.Push, error)
 }
@@ -345,9 +346,13 @@ func (a *App) Cycle(ctx context.Context) View {
 	}
 
 	var prs []forge.PR
+	prsOK := false // the open-PR list is complete: only then may "missing" mean "closed"
 	if a.GitHub != nil {
 		if prs, err = a.GitHub.OpenPRs(ctx); err != nil {
 			fail("github pull requests", err)
+			prs = nil
+		} else {
+			prsOK = true
 		}
 	}
 	rel := a.releases(ctx, &v)
@@ -416,7 +421,7 @@ func (a *App) Cycle(ctx context.Context) View {
 	v.Guided = a.guided(decl, rel)
 
 	a.alarms(ctx, inv, frank, hop, hopScanned, &v)
-	a.reconcile(ctx, prs, frank, &v)
+	a.reconcile(ctx, prs, prsOK, frank, &v)
 	if a.Launcher != nil {
 		for _, end := range a.Launcher.Tick(ctx) {
 			a.logf("session %s ended: %s", end.ID, end.Outcome)
@@ -821,7 +826,7 @@ func (a *App) report(ctx context.Context, items []engine.Item, v *View, rs *repo
 	rs.LastReport, rs.LastItems = a.now(), ids
 }
 
-func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapshot, v *View) {
+func (a *App) reconcile(ctx context.Context, prs []forge.PR, prsOK bool, frank *live.Snapshot, v *View) {
 	if a.GitHub == nil {
 		return
 	}
@@ -829,11 +834,19 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapsho
 	for _, p := range prs {
 		open[p.Number] = true
 	}
+	// Fail closed: a PR is "closed" only when GitHub itself said so for that
+	// PR just now. An unreadable list or PR leaves the update as it is.
 	merged := map[int]string{}
+	closed := map[int]bool{}
 	for _, u := range a.Store.Updates() {
-		if (u.State == store.Pending || u.State == store.Approved || u.State == store.Held) && u.PR > 0 && !open[u.PR] {
-			if p, err := a.GitHub.PR(ctx, u.PR); err == nil && p.Merged {
-				merged[u.PR] = p.MergeCommitSHA
+		if prsOK && (u.State == store.Pending || u.State == store.Approved || u.State == store.Held) && u.PR > 0 && !open[u.PR] {
+			if p, err := a.GitHub.PR(ctx, u.PR); err == nil && p.Number == u.PR {
+				switch {
+				case p.Merged:
+					merged[u.PR] = p.MergeCommitSHA
+				case p.State == "closed":
+					closed[u.PR] = true
+				}
 			}
 		}
 		// A revert PR merged outside the console still has to be verified.
@@ -851,11 +864,15 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapsho
 			}
 		}
 	}
-	stale, err := a.staleBranches(ctx, prs)
-	if err != nil {
-		v.Errors = append(v.Errors, "branches: "+scrub.String(err.Error()))
+	var stale []string
+	if prsOK { // never delete a branch on an incomplete picture of the open PRs
+		var err error
+		if stale, err = a.staleBranches(ctx, prs); err != nil {
+			v.Errors = append(v.Errors, "branches: "+scrub.String(err.Error()))
+			stale = nil
+		}
 	}
-	cleanups, errs := a.Store.Reconcile(store.ReconcileInput{OpenPRs: open, MergedPRs: merged, SessionPods: pods, StaleBranches: stale})
+	cleanups, errs := a.Store.Reconcile(store.ReconcileInput{OpenPRs: open, MergedPRs: merged, ClosedPRs: closed, SessionPods: pods, StaleBranches: stale})
 	for _, err := range errs {
 		a.logf("%v", err)
 		v.Errors = append(v.Errors, scrub.String(err.Error()))
@@ -871,6 +888,11 @@ func (a *App) reconcile(ctx context.Context, prs []forge.PR, frank *live.Snapsho
 				a.Store.AddEvent(store.Event{Update: c.Target, Action: "cleanup", Reason: c.Reason})
 			}
 		case store.CleanupBranch:
+			// Re-check with GitHub right before deleting: any open PR on the
+			// branch, or an unreadable answer, and it stays.
+			if inUse, err := a.GitHub.HasOpenPR(ctx, c.Target); err != nil || inUse {
+				continue
+			}
 			if err := a.GitHub.DeleteBranch(ctx, c.Target); err != nil && !errors.Is(err, forge.ErrNotFound) {
 				v.Errors = append(v.Errors, "cleanup "+c.Target+": "+scrub.String(err.Error()))
 				continue

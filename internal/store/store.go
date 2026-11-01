@@ -667,6 +667,7 @@ type Cleanup struct {
 type ReconcileInput struct {
 	OpenPRs       map[int]bool
 	MergedPRs     map[int]string // number -> merge sha (closed AND merged)
+	ClosedPRs     map[int]bool   // confirmed closed WITHOUT merging (read just now)
 	SessionPods   []live.Pod     // pods in the session namespace
 	StaleBranches []string       // cluster-update/batch-* branches with no open PR
 	ApplyTimeout  time.Duration  // merged → applied
@@ -728,7 +729,12 @@ func (s *Store) Reconcile(in ReconcileInput) ([]Cleanup, []error) {
 					s.shipMembers(id)
 					continue
 				}
-				try(id, s.transition(id, Abandoned, "reconciler", fmt.Sprintf("PR #%d closed without merging", u.PR), nil))
+				// Fail closed: abandoned only when GitHub confirmed the PR
+				// closed unmerged, never because it is merely missing from a
+				// (possibly failed or partial) open list.
+				if in.ClosedPRs[u.PR] {
+					try(id, s.transition(id, Abandoned, "reconciler", fmt.Sprintf("PR #%d closed without merging", u.PR), nil))
+				}
 			}
 		case Merged:
 			if now.Sub(u.Since) > in.ApplyTimeout {
