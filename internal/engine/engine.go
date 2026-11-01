@@ -509,7 +509,10 @@ func (e *Engine) ApproveBatch(ctx context.Context, items []Item, ids []string, b
 	var res BatchResult
 	var lines []string
 	for _, it := range sel {
-		if err := e.Forge.MergeBranch(ctx, branch, it.PR.HeadRef, "batch: "+it.PR.Title); err != nil {
+		// By the VERIFIED head SHA, never the branch name: a push to the
+		// Renovate branch after verification must not ride into the batch
+		// (the merges API accepts a commit SHA as head).
+		if err := e.Forge.MergeBranch(ctx, branch, it.PR.HeadSHA, "batch: "+it.PR.Title); err != nil {
 			if forge.IsConflict(err) {
 				res.Skipped = append(res.Skipped, it.Name)
 				continue

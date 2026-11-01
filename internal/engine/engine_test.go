@@ -275,7 +275,7 @@ func TestApproveNowWaitsForCIThenMerges(t *testing.T) {
 }
 
 func TestSuggestAndApproveBatch(t *testing.T) {
-	f, l := &fakeForge{conflict: map[string]bool{"renovate/c": true}}, newLedger()
+	f, l := &fakeForge{conflict: map[string]bool{"sha3": true}}, newLedger()
 	now := t0
 	e := newEngine(f, l, &now, emptyInv())
 	prs := []forge.PR{
@@ -298,7 +298,9 @@ func TestSuggestAndApproveBatch(t *testing.T) {
 	if len(f.prs) != 1 || res.PR.Number != 100 {
 		t.Fatalf("one batch PR expected: %+v", f.prs)
 	}
-	if strings.Join(f.branchMerge, ",") != "renovate/a" || len(res.Skipped) != 1 || res.Skipped[0] != "c" {
+	// c1s-r9: each member is merged into the batch by its VERIFIED head SHA,
+	// never by branch name (a push after verification must not ride along).
+	if strings.Join(f.branchMerge, ",") != "sha1" || len(res.Skipped) != 1 || res.Skipped[0] != "c" {
 		t.Errorf("merged=%v skipped=%v", f.branchMerge, res.Skipped)
 	}
 	if ok, by := l.Approved(BatchID(100)); !ok || by != "derio" {
