@@ -110,6 +110,9 @@ type SessionPlan struct {
 	Request  session.Request
 	Title    string
 	Rollback string
+	Kind     string // the update's kind (talos, kubernetes, chart, image, rollout)
+	Name     string
+	From, To string
 }
 
 // planSession resolves a Needs-action id (a session-path PR item, a guided
@@ -136,6 +139,7 @@ func (a *App) planSession(ctx context.Context, id string) (SessionPlan, error) {
 			typ = session.TypeStateful
 		}
 		p := a.plan(ctx, id, typ, it.Cluster, it.App, it.PR.Title, it.Rollback, "", "")
+		p.Kind, p.Name, p.From, p.To = it.Kind, it.Name, it.From, it.To
 		if strings.TrimSpace(it.PR.Body) != "" {
 			p.Request.Brief += "\n\n## Untrusted data: the Renovate PR body\n\n" + trust.Fence(fmt.Sprintf("PR #%d's body (GitHub)", it.PR.Number), it.PR.Body) + "\n"
 		}
@@ -150,14 +154,18 @@ func (a *App) planSession(ctx context.Context, id string) (SessionPlan, error) {
 			typ = session.TypeHopOS
 		}
 		title := fmt.Sprintf("%s %s %s → %s (step %d)", g.Cluster, g.Kind, g.From, g.To, g.Position)
-		return a.plan(ctx, id, typ, g.Cluster, "", title, g.Rollback, g.TalosClient, g.KubectlClient), nil
+		p := a.plan(ctx, id, typ, g.Cluster, "", title, g.Rollback, g.TalosClient, g.KubectlClient)
+		p.Kind, p.Name, p.From, p.To = g.Kind, g.Kind, g.From, g.To
+		return p, nil
 	}
 	for _, r := range v.Rollouts {
 		if r.UpgradeID != id {
 			continue
 		}
 		title := fmt.Sprintf("Rollout %s/%s is %s: promote or abort", trust.Title(r.Namespace), trust.Title(r.Name), trust.Title(r.Phase))
-		return a.plan(ctx, id, session.TypeRollouts, r.Cluster, r.App, title, "Abort returns traffic to the stable ReplicaSet.", "", ""), nil
+		p := a.plan(ctx, id, session.TypeRollouts, r.Cluster, r.App, title, "Abort returns traffic to the stable ReplicaSet.", "", "")
+		p.Kind = "rollout"
+		return p, nil
 	}
 	return SessionPlan{}, fmt.Errorf("app: nothing to start a session for: %s", id)
 }
@@ -238,7 +246,12 @@ func (a *App) StartSession(ctx context.Context, id, by string) (session.Record, 
 	if err != nil {
 		return session.Record{}, false, err
 	}
-	a.Store.Track(store.Update{ID: id, Title: p.Title, Cluster: p.Request.Cluster, Apps: nonEmpty(p.Request.App), Path: frankrepo.PathSession, Rollback: p.Rollback})
+	// Kind and cluster are recorded so the update is verifiable (an OS step
+	// by verify.OS once its version PR merges) — c1c-r5.
+	a.Store.Track(store.Update{ID: id, Title: p.Title, Cluster: p.Request.Cluster, Apps: nonEmpty(p.Request.App), Path: frankrepo.PathSession,
+		Rollback: p.Rollback, Kind: p.Kind, Name: p.Name, From: p.From, To: p.To})
+	// A new session on an update an earlier session abandoned reopens it.
+	_ = a.Store.Reopen(id, by, "session started again")
 	rec, created, err := a.Launcher.Start(ctx, p.Request)
 	if err == nil && created {
 		a.Store.AddEvent(store.Event{Update: id, Action: "session-requested", By: by})
@@ -283,8 +296,28 @@ func (a *App) EndSession(ctx context.Context, id, by string) error {
 		return ErrUnavailable
 	}
 	err := a.Launcher.End(ctx, id, "ended by "+by, by, "")
+	if err == nil {
+		a.sessionOutcome(id, "ended by "+by)
+	}
 	_ = a.Store.Save()
 	return err
+}
+
+// sessionOutcome maps how a session ended onto its update (c1c-r5). Nothing
+// merged yet (pending/approved/held): a "needs you" or failed end is
+// failed (the operator must look), any other end is abandoned. Once its PR
+// merged, verification decides; the session's end changes nothing.
+func (a *App) sessionOutcome(id, outcome string) {
+	u, ok := a.Store.Get(id)
+	if !ok || (u.State != store.Pending && u.State != store.Approved && u.State != store.Held) {
+		return
+	}
+	low := strings.ToLower(outcome)
+	if strings.Contains(low, "needs you") || strings.Contains(low, "fail") || strings.Contains(low, "hard ceiling") || strings.Contains(low, " cap") {
+		_ = a.Store.Transition(id, store.Failed, "session", "session ended — needs you: "+outcome, nil)
+		return
+	}
+	_ = a.Store.Transition(id, store.Abandoned, "session", "session ended without merging anything: "+outcome, nil)
 }
 
 // StepEvent is the session reporting a step start or finish.
@@ -316,6 +349,13 @@ func (a *App) SessionFinished(ctx context.Context, id, token, outcome, transcrip
 		return err
 	}
 	err := a.Launcher.End(ctx, rec.ID, outcome, "session", transcript)
+	if err == nil {
+		// Session-supplied and already capped (4 KiB); shown shortened.
+		if len(outcome) > 300 {
+			outcome = outcome[:300] + "…"
+		}
+		a.sessionOutcome(id, outcome)
+	}
 	_ = a.Store.Save()
 	return err
 }

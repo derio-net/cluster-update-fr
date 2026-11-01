@@ -275,11 +275,31 @@ func (s *Store) Track(u Update) {
 		if len(u.Apps) > 0 {
 			cur.Apps = u.Apps
 		}
+		for _, f := range []struct {
+			dst *string
+			v   string
+		}{{&cur.Kind, u.Kind}, {&cur.Cluster, u.Cluster}, {&cur.Name, u.Name}, {&cur.From, u.From}, {&cur.To, u.To}, {&cur.Path, u.Path}} {
+			if *f.dst == "" && f.v != "" {
+				*f.dst = f.v
+			}
+		}
 		return
 	}
 	u.State, u.Since = Pending, s.now()
 	cp := u
 	s.d.Updates[u.ID] = &cp
+}
+
+// Reopen moves an ABANDONED update back to pending (a new session for an
+// update an earlier session ended without merging). Other states: no-op.
+func (s *Store) Reopen(id, by, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.d.Updates[id]
+	if !ok || u.State != Abandoned {
+		return nil
+	}
+	return s.transitionAs(id, Pending, by, reason, nil, true)
 }
 
 // Get returns a copy of an update.

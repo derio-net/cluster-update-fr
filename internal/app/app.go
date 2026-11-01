@@ -413,6 +413,7 @@ func (a *App) Cycle(ctx context.Context) View {
 	if a.Launcher != nil {
 		for _, end := range a.Launcher.Tick(ctx) {
 			a.logf("session %s ended: %s", end.ID, end.Outcome)
+			a.sessionOutcome(end.ID, end.Outcome)
 		}
 		v.Warnings = append(v.Warnings, a.sessionAlarms(ctx)...)
 		// Routine lifetime warnings are console-only (c1c-r19): only the hard

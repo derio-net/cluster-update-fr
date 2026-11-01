@@ -405,6 +405,46 @@ func TestBatchIsVerifiedThroughItsMembers(t *testing.T) {
 	}
 }
 
+// c1c-r5: a session-tracked update records its kind and cluster, and the
+// session's end maps to a state: ended with nothing merged → abandoned;
+// pod died → failed "needs you"; a new session reopens an abandoned update.
+func TestSessionOutcomesMapToStates(t *testing.T) {
+	now := t0
+	a, _, _, k := newApp(t, &now, false)
+	a.Cycle(context.Background())
+	const id = "frank-os-talos-1.13.4"
+	if _, _, err := a.StartSession(context.Background(), id, "derio"); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := a.Store.Get(id)
+	if u.Kind != "talos" || u.Cluster != "frank" || u.To != "1.13.4" {
+		t.Fatalf("session-tracked update = %+v", u)
+	}
+	if err := a.EndSession(context.Background(), id, "derio"); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := a.Store.Get(id); u.State != store.Abandoned {
+		t.Fatalf("ended with nothing merged: %s", u.State)
+	}
+	if _, _, err := a.StartSession(context.Background(), id, "derio"); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := a.Store.Get(id); u.State != store.Pending {
+		t.Fatalf("a new session must reopen the update: %s", u.State)
+	}
+	k.mu.Lock()
+	for key := range k.objs {
+		if strings.HasPrefix(key, "pods/") {
+			delete(k.objs, key) // the pod dies
+		}
+	}
+	k.mu.Unlock()
+	a.Cycle(context.Background())
+	if u, _ := a.Store.Get(id); u.State != store.Failed || !strings.Contains(u.Reason, "needs you") {
+		t.Fatalf("pod died: %+v", u)
+	}
+}
+
 type noVulnGetter struct{ fixtureGetter }
 
 func (g noVulnGetter) Get(ctx context.Context, path string, out any) error {
