@@ -209,6 +209,25 @@ func exactly(path string, files []string) bool {
 	return false
 }
 
+// IsSensitive reports a path that only the session path may touch.
+func IsSensitive(path string) bool { return within(path, sensitive) }
+
+var reviewLine = regexp.MustCompile(`^[+-][ \t]*(repoURL|destination|server|namespace|project|chart|path|syncPolicy|automated|prune|ignoreDifferences):`)
+
+// ReviewNotes lists the changed lines of a patch an operator must look at
+// before merging: Application source/destination/sync-policy keys (c1d-r5).
+func ReviewNotes(patch string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range strings.Split(patch, "\n") {
+		if m := reviewLine.FindStringSubmatch(l); m != nil && !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, "changes "+m[1])
+		}
+	}
+	return out
+}
+
 func within(path string, allowed []string) bool {
 	for _, a := range allowed {
 		if strings.HasSuffix(a, "/") && strings.HasPrefix(path, a) || path == a {

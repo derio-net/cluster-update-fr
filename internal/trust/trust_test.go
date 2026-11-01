@@ -337,6 +337,16 @@ func TestRevertScopeSensitiveOnlyForSessionPRs(t *testing.T) {
 	}
 }
 
+func TestReviewNotesFlagSourceChanges(t *testing.T) {
+	n := ReviewNotes("-    repoURL: https://a\n+    repoURL: https://b\n-    targetRevision: 1\n+    targetRevision: 2\n+  destination:")
+	if strings.Join(n, ",") != "changes repoURL,changes destination" {
+		t.Fatalf("notes = %v", n)
+	}
+	if !IsSensitive("apps/root/templates/x.yaml") || IsSensitive("versions/frank.yaml") {
+		t.Fatal("IsSensitive")
+	}
+}
+
 func TestOSAndOmniScopes(t *testing.T) {
 	ctx := context.Background()
 	pr := goodPR(7)

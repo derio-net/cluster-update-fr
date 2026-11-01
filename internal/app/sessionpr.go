@@ -35,6 +35,18 @@ type SessionPR struct {
 	Branch      string    `json:"branch"`
 	RequestedAt time.Time `json:"requested_at"`
 	Untrusted   string    `json:"untrusted,omitempty"` // why it cannot be merged
+	URL         string    `json:"url,omitempty"`
+	// Files is what the operator reviews before clicking (c1d-r5): every
+	// changed file at the verified head, sensitive ones flagged, and
+	// Application source/destination/sync changes called out.
+	Files []ReviewFile `json:"files,omitempty"`
+}
+
+// ReviewFile is one changed file of a session PR, as shown for review.
+type ReviewFile struct {
+	Name      string   `json:"name"`
+	Sensitive bool     `json:"sensitive,omitempty"`
+	Notes     []string `json:"notes,omitempty"`
 }
 
 // Key is the request's identity: (session, PR) — never the PR alone, so
@@ -164,7 +176,15 @@ func (a *App) RequestMerge(ctx context.Context, id, token string, pr int) error 
 	}
 	a.eng(a.policy())
 	checkErr := a.trustConfig().Check(ctx, a.GitHub, p, scope)
-	req := SessionPR{Session: id, PR: pr, HeadSHA: p.HeadSHA, Title: trust.Title(p.Title), Branch: trust.Title(p.HeadRef), RequestedAt: a.now()}
+	req := SessionPR{Session: id, PR: pr, HeadSHA: p.HeadSHA, Title: trust.Title(p.Title), Branch: trust.Title(p.HeadRef), RequestedAt: a.now(),
+		URL: fmt.Sprintf("https://github.com/%s/pull/%d", a.Cfg.FrankRepo, pr)}
+	if changed, err := a.GitHub.Compare(ctx, p.BaseRef, p.HeadSHA); err == nil {
+		for _, c := range changed {
+			req.Files = append(req.Files, ReviewFile{Name: trust.Title(c.Name), Sensitive: trust.IsSensitive(c.Name), Notes: trust.ReviewNotes(c.Patch)})
+		}
+	} else if checkErr == nil {
+		checkErr = fmt.Errorf("its changes cannot be shown for review: %w", err)
+	}
 	if checkErr != nil {
 		req.Untrusted = scrub.String(checkErr.Error())
 	}

@@ -108,7 +108,12 @@ Every credential is optional; a missing one disables only what needs it.
   own location. Sensitive paths (`.github/`, `scripts/`, `apps/root/`,
   Hop's `clusters/hop/apps/root/` and updater apps, the policy files) only for
   that dependency on the session path — except an app's own root template,
-  which any path may change on its `targetRevision` line alone. Every merge
+  which any path may change on its `targetRevision` line alone. On the
+  session path an app's own root template stays fully editable — a chart
+  major can legitimately need its Helm parameters or value files changed —
+  so the **Merge session PR** row lists every changed file, flags sensitive
+  paths and calls out `repoURL` / `destination` / sync-policy changes before
+  the operator clicks (chosen over narrowing the scope). Every merge
   re-verifies and is pinned to the verified head SHA (batch members are
   merged into the batch branch by SHA too).
 - **CI signal**: every declared required context must be `success` (a Gitea

@@ -456,6 +456,23 @@ func TestAttachIsAPostAndCSPFormActionIsSelf(t *testing.T) {
 
 // c1c-r1: a session ASKS for a merge (step token, {"pr": N}); the operator
 // merges with a CSRF-checked click; the session API has no merge.
+// c1d-r5: before the click the operator sees the PR link, every changed
+// file, sensitive paths flagged and Application source changes called out.
+func TestSessionPRRowShowsWhatWillBeMerged(t *testing.T) {
+	b, h := newServer(t)
+	b.view.SessionPRs = []app.SessionPR{{Session: "frank-os-1", PR: 42, Title: "talos", Branch: "cluster-update/session-frank-os-1/v",
+		URL: "https://github.com/derio-net/frank/pull/42", Files: []app.ReviewFile{
+			{Name: "versions/frank.yaml"},
+			{Name: "apps/root/templates/cilium.yaml", Sensitive: true, Notes: []string{"changes repoURL"}},
+		}}}
+	body := get(h, "/", "derio").Body.String()
+	for _, want := range []string{`href="https://github.com/derio-net/frank/pull/42"`, "versions/frank.yaml", "apps/root/templates/cilium.yaml", "sensitive", "changes repoURL", "Merge session PR"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("merge row lacks %q", want)
+		}
+	}
+}
+
 func TestSessionPRMergeFlow(t *testing.T) {
 	b, hs := newHandlers(t)
 	api := func(path, token, body string) int {
