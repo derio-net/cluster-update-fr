@@ -376,11 +376,17 @@ func (a *App) Cycle(ctx context.Context) View {
 			a.logf("session %s ended: %s", end.ID, end.Outcome)
 		}
 		v.Warnings = append(v.Warnings, a.sessionAlarms(ctx)...)
-		for _, w := range a.Launcher.Warnings() {
-			v.Warnings = append(v.Warnings, w)
-			a.send(ctx, "⏳ "+escape(w))
-		}
+		// Routine lifetime warnings are console-only (c1c-r19): only the hard
+		// ceiling / step caps alarm in #security (sessionAlarms above). The
+		// warning is shown every cycle while it holds, not once.
+		_ = a.Launcher.Warnings()
 		v.Sessions = a.Launcher.Sessions()
+		for _, s := range v.Sessions {
+			if s.Warned && s.StepRunning {
+				v.Warnings = append(v.Warnings, fmt.Sprintf("session %s passed its %s maximum lifetime while step %q is running; it ends after the step (hard ceiling %s)",
+					s.ID, a.Launcher.MaxLifetime, trust.Title(s.StepName), a.Launcher.HardCeiling))
+			}
+		}
 	}
 	rs := reportState{}
 	a.Store.GetBlob(blobReport, &rs)

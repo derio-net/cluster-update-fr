@@ -335,6 +335,46 @@ func TestStartSessionTwiceAttaches(t *testing.T) {
 	}
 }
 
+// c1c-r19: a routine lifetime warning (max lifetime passed during a step)
+// shows in the console only; #security gets the hard-ceiling alarm.
+func TestLifetimeWarningStaysInTheConsole(t *testing.T) {
+	now := t0
+	a, _, tg, _ := newApp(t, &now, false)
+	a.Launcher.HardCeiling = 16 * time.Hour
+	a.Cycle(context.Background())
+	if _, _, err := a.StartSession(context.Background(), "frank-os-talos-1.13.4", "derio"); err != nil {
+		t.Fatal(err)
+	}
+	tok := a.Launcher.StepToken("frank-os-talos-1.13.4")
+	if err := a.StepEvent("frank-os-talos-1.13.4", tok, true, "talos rollout"); err != nil {
+		t.Fatal(err)
+	}
+	n := len(tg.msgs)
+	now = now.Add(9 * time.Hour)
+	v := a.Cycle(context.Background())
+	warned := false
+	for _, w := range v.Warnings {
+		warned = warned || strings.Contains(w, "maximum lifetime")
+	}
+	if !warned {
+		t.Errorf("warning missing from the console: %v", v.Warnings)
+	}
+	for _, m := range tg.msgs[n:] {
+		if strings.Contains(m, "maximum lifetime") {
+			t.Errorf("a routine lifetime warning reached Telegram: %q", m)
+		}
+	}
+	now = now.Add(8 * time.Hour) // past the hard ceiling
+	a.Cycle(context.Background())
+	alarmed := false
+	for _, m := range tg.msgs[n:] {
+		alarmed = alarmed || strings.Contains(m, "hard ceiling")
+	}
+	if !alarmed {
+		t.Errorf("hard-ceiling alarm not sent to #security: %v", tg.msgs[n:])
+	}
+}
+
 func TestUnconfiguredActionsDegrade(t *testing.T) {
 	now := t0
 	a, _, _, _ := newApp(t, &now, false)
