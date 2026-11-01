@@ -67,6 +67,15 @@ type Backend interface {
 type Options struct {
 	Auth   identity.Authenticator // nil = refuse everything
 	Secret []byte                 // CSRF / flash key (random per process)
+	// TranscriptMax is the session transcript cap in bytes (0 = 1 MiB).
+	TranscriptMax int
+}
+
+func (o Options) transcriptMax() int {
+	if o.TranscriptMax <= 0 {
+		return 1 << 20
+	}
+	return o.TranscriptMax
 }
 
 // Handlers are the three listeners' handlers.
@@ -378,7 +387,17 @@ func (s *server) apiFinish(w http.ResponseWriter, r *http.Request) {
 		Outcome    string `json:"outcome"`
 		Transcript string `json:"transcript"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&in); err != nil || in.Outcome == "" {
+	// The body is capped before it is decoded: JSON escaping can at most
+	// ~6x a transcript, but a sane client sends near 1x; allow 2x + slack
+	// and let the backend enforce the exact transcript cap (c1s-r11).
+	limit := int64(2*s.opts.transcriptMax() + 16<<10)
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(&in)
+	var tooBig *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooBig):
+		http.Error(w, "transcript too large", http.StatusRequestEntityTooLarge)
+		return
+	case err != nil || in.Outcome == "":
 		http.Error(w, "body must be {\"outcome\":...,\"transcript\":...}", http.StatusBadRequest)
 		return
 	}
@@ -395,6 +414,8 @@ func apiError(w http.ResponseWriter, err error) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, session.ErrNoSession):
 		http.Error(w, "no such session", http.StatusNotFound)
+	case errors.Is(err, session.ErrTranscriptTooLarge):
+		http.Error(w, scrub.String(err.Error()), http.StatusRequestEntityTooLarge)
 	default:
 		http.Error(w, scrub.String(err.Error()), http.StatusInternalServerError)
 	}

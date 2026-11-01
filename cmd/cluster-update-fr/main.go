@@ -68,7 +68,8 @@ func main() {
 		a.Frank = frank
 		a.Launcher = &session.Launcher{Kube: frank, Store: st, Namespace: cfg.SessionNamespace, Image: cfg.SessionImage,
 			CredDir: cfg.SessionSecretDir, ConsoleURL: cfg.SessionAPIURL, IdleTimeout: cfg.IdleTimeout, MaxLifetime: cfg.MaxLifetime,
-			HardCeiling: cfg.HardCeiling, StepCap: cfg.StepCap, StepTotalCap: cfg.StepTotalCap, MaxStepStarts: cfg.MaxStepStarts}
+			HardCeiling: cfg.HardCeiling, StepCap: cfg.StepCap, StepTotalCap: cfg.StepTotalCap, MaxStepStarts: cfg.MaxStepStarts,
+			TranscriptMax: cfg.TranscriptMax, ScrubTimeout: cfg.TranscriptScrubTimeout}
 		a.Launcher.RegisterCredentials() // before any listener serves a byte (c1s-r5)
 	}
 	if cfg.HopKubeconfig != "" {
@@ -97,7 +98,7 @@ func main() {
 	if _, err := rand.Read(secret); err != nil {
 		logger.Fatal(err)
 	}
-	h := web.New(a, web.Options{Auth: auth, Secret: secret})
+	h := web.New(a, web.Options{Auth: auth, Secret: secret, TranscriptMax: cfg.TranscriptMax})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()

@@ -466,4 +466,13 @@ func TestSessionAPIUsesTheStepToken(t *testing.T) {
 		t.Errorf("bad body = %d", c)
 	}
 	_ = errors.New
+	// c1s-r11: an oversize finish body is refused before it is decoded.
+	n := len(b.calls)
+	huge := `{"outcome":"x","transcript":"` + strings.Repeat("a", 3<<20) + `"}`
+	if c := req("/api/sessions/pr-6/finish", "good", huge); c != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversize transcript = %d", c)
+	}
+	if len(b.calls) != n {
+		t.Error("an oversize finish reached the backend")
+	}
 }

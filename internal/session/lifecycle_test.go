@@ -235,6 +235,33 @@ func TestSessionCredentialsAreRegisteredGlobally(t *testing.T) {
 	}
 }
 
+// c1s-r11: an oversize transcript is refused (the session is not ended, it
+// may retry with less); redaction runs under a time limit, and a transcript
+// whose redaction does not finish is withheld, never stored raw.
+func TestTranscriptCapAndScrubTimeout(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	l.TranscriptMax = 1 << 10
+	start(t, l, "pr-8", TypeChartMajor)
+	l.Store.Track(store.Update{ID: "pr-8", Title: "x"})
+	if err := l.End(context.Background(), "pr-8", "done", "session", strings.Repeat("a", 2<<10)); !errors.Is(err, ErrTranscriptTooLarge) {
+		t.Fatalf("oversize transcript: %v", err)
+	}
+	if _, ok := l.Get("pr-8"); !ok {
+		t.Fatal("a refused transcript must not end the session")
+	}
+	l.ScrubTimeout = time.Nanosecond
+	l.scrubFn = func(_ *scrub.Set, s string) string { time.Sleep(50 * time.Millisecond); return s }
+	if err := l.End(context.Background(), "pr-8", "done", "session", "secret-ish text"); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := l.Store.Get("pr-8")
+	if strings.Contains(u.Transcript, "secret-ish") || !strings.Contains(u.Transcript, "withheld") {
+		t.Fatalf("transcript after a scrub timeout = %q", u.Transcript)
+	}
+}
+
 type stuckDelete struct{ *fakeKube }
 
 func (s stuckDelete) Delete(_ context.Context, _, res, _ string) error {

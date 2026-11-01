@@ -84,7 +84,11 @@ type Config struct {
 	// MaxLifetime) and MaxStepStarts its number of step starts (default 50).
 	StepTotalCap  time.Duration
 	MaxStepStarts int
-	ReportHour    int // UTC hour of the daily report
+	// TranscriptMax caps a session transcript (bytes, default 1 MiB);
+	// TranscriptScrubTimeout bounds its redaction (default 10s).
+	TranscriptMax          int
+	TranscriptScrubTimeout time.Duration
+	ReportHour             int // UTC hour of the daily report
 
 	Telegram Telegram
 
@@ -175,6 +179,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		{"SESSION_HARD_CEILING", 0, &c.HardCeiling}, // 0 here = derive below
 		{"SESSION_STEP_CAP", 4 * time.Hour, &c.StepCap},
 		{"SESSION_STEP_TOTAL_CAP", 0, &c.StepTotalCap}, // 0 here = MaxLifetime
+		{"SESSION_TRANSCRIPT_SCRUB_TIMEOUT", 10 * time.Second, &c.TranscriptScrubTimeout},
 	}
 	for _, d := range durations {
 		*d.dst = d.def
@@ -188,6 +193,14 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.StepTotalCap == 0 {
 		c.StepTotalCap = c.MaxLifetime
+	}
+	c.TranscriptMax = 1 << 20
+	if v := strings.TrimSpace(getenv("SESSION_TRANSCRIPT_MAX")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1024 || n > 64<<20 {
+			return nil, fmt.Errorf("config: SESSION_TRANSCRIPT_MAX=%q must be bytes between 1024 and 67108864", v)
+		}
+		c.TranscriptMax = n
 	}
 	c.MaxStepStarts = 50
 	if v := strings.TrimSpace(getenv("SESSION_MAX_STEP_STARTS")); v != "" {

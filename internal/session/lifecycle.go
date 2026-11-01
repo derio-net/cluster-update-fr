@@ -212,6 +212,9 @@ func (l *Launcher) endAlarm(ctx context.Context, r Record, kind, outcome string)
 // End deletes the session's pod and Secrets, releases its lock, and keeps
 // the outcome and the scrubbed transcript in History. Idempotent.
 func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) error {
+	if len(transcript) > l.transcriptMax() {
+		return fmt.Errorf("%w: %d bytes, limit %d", ErrTranscriptTooLarge, len(transcript), l.transcriptMax())
+	}
 	rec, ok := l.Get(id)
 	set := l.Scrubber(id)
 	cerr := l.cleanup(ctx, PodName(id))
@@ -224,7 +227,7 @@ func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) 
 	Locks{Store: l.Store}.Release(rec.Target, id)
 	_ = l.update(func(m map[string]Record) error { delete(m, id); return nil })
 	if transcript != "" {
-		clean := scrub.Transcript(set, transcript)
+		clean := l.scrubTranscript(set, transcript)
 		_ = l.Store.Edit(id, func(u *store.Update) { u.Transcript = clean })
 	}
 	l.Store.AddEvent(store.Event{At: l.now(), Update: id, Action: "session-ended", By: by, Reason: set.String(outcome)})
@@ -233,6 +236,41 @@ func (l *Launcher) End(ctx context.Context, id, outcome, by, transcript string) 
 	delete(l.tokens, id)
 	l.mu.Unlock()
 	return cerr // a foreign object under the session's name is left and reported
+}
+
+// ErrTranscriptTooLarge: the finish call's transcript exceeds the cap; the
+// session is not ended and may finish again with less.
+var ErrTranscriptTooLarge = errors.New("session: transcript too large")
+
+func (l *Launcher) transcriptMax() int {
+	if l.TranscriptMax <= 0 {
+		return 1 << 20
+	}
+	return l.TranscriptMax
+}
+
+// TranscriptLimit is the cap the session API enforces on request bodies.
+func (l *Launcher) TranscriptLimit() int { return l.transcriptMax() }
+
+// scrubTranscript redacts under a time limit. A transcript whose redaction
+// does not finish in time is WITHHELD, never stored unredacted.
+func (l *Launcher) scrubTranscript(set *scrub.Set, text string) string {
+	fn := l.scrubFn
+	if fn == nil {
+		fn = scrub.Transcript
+	}
+	timeout := l.ScrubTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	done := make(chan string, 1)
+	go func() { done <- fn(set, text) }()
+	select {
+	case s := <-done:
+		return s
+	case <-time.After(timeout):
+		return fmt.Sprintf("[transcript withheld: redaction of %d bytes did not finish within %s]", len(text), timeout)
+	}
 }
 
 // CleanupPod removes a leftover session pod (and its Secrets) found by

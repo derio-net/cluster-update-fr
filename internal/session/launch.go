@@ -112,6 +112,11 @@ type Launcher struct {
 	// steps cannot stand in for one long one.
 	StepTotalCap  time.Duration
 	MaxStepStarts int
+	// TranscriptMax caps a finished session's transcript (bytes, 0 = 1 MiB);
+	// ScrubTimeout bounds its redaction (0 = 10s) — c1s-r11.
+	TranscriptMax int
+	ScrubTimeout  time.Duration
+	scrubFn       func(*scrub.Set, string) string // tests
 
 	startMu  sync.Mutex // serialises Start and the lifecycle Tick
 	mu       sync.Mutex
