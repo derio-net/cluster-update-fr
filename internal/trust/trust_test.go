@@ -268,6 +268,33 @@ func TestChartBumpMayChangeOnlyItsOwnTargetRevision(t *testing.T) {
 	}
 }
 
+// sec2-3: one session cannot claim another's branches by id prefix: session
+// "pr-7" must not pass with a branch of session "pr-7-hop" (or "pr-7.1").
+func TestSessionBranchPrefixCannotCollide(t *testing.T) {
+	ctx := context.Background()
+	conf := cfg()
+	conf.SessionBot = "frank-upgrade-session[bot]"
+	scope := SessionScope("pr-7", engine.Item{Kind: "image", Cluster: "frank", App: "homepage"})
+	for _, branch := range []string{
+		engine.SessionBranchPrefix + "pr-7-hop/x",
+		engine.SessionBranchPrefix + "pr-7.1/x",
+		engine.SessionBranchPrefix + "pr-7-x", // the old separator
+	} {
+		pr := goodPR(9)
+		pr.Author, pr.HeadRef = conf.SessionBot, branch
+		a := api(9, pr, []forge.Commit{signed("head", conf.SessionBot, "web-flow")}, []string{"apps/homepage/x.yaml"})
+		if err := conf.Check(ctx, a, pr, scope); err == nil || !strings.Contains(err.Error(), "prefix") {
+			t.Errorf("branch %q accepted for session pr-7: %v", branch, err)
+		}
+	}
+	pr := goodPR(9)
+	pr.Author, pr.HeadRef = conf.SessionBot, engine.SessionBranchPrefix+"pr-7/version"
+	a := api(9, pr, []forge.Commit{signed("head", conf.SessionBot, "web-flow")}, []string{"apps/homepage/x.yaml"})
+	if err := conf.Check(ctx, a, pr, scope); err != nil {
+		t.Fatalf("its own branch: %v", err)
+	}
+}
+
 func TestOSAndOmniScopes(t *testing.T) {
 	ctx := context.Background()
 	pr := goodPR(7)

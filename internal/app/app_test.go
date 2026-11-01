@@ -542,11 +542,12 @@ func TestSessionPRMergeRoute(t *testing.T) {
 		wantTrusted   bool
 		wantRefusalIn string
 	}{
-		{"its own PR", engine.SessionBranchPrefix + id + "-version", sessionBot, []string{"versions/frank.yaml"}, true, ""},
-		{"another session's prefix", engine.SessionBranchPrefix + "hop-os-talos-1.13.4-version", sessionBot, []string{"versions/frank.yaml"}, false, "prefix"},
-		{"not the session bot", engine.SessionBranchPrefix + id + "-version", renovateBot, []string{"versions/frank.yaml"}, false, "author"},
-		{"outside its scope", engine.SessionBranchPrefix + id + "-version", sessionBot, []string{"versions/frank.yaml", "apps/grafana/values.yaml"}, false, "outside"},
-		{"touches the policy", engine.SessionBranchPrefix + id + "-version", sessionBot, []string{"update-policy.yaml"}, false, "sensitive"},
+		{"its own PR", engine.SessionBranchPrefix + id + "/version", sessionBot, []string{"versions/frank.yaml"}, true, ""},
+		{"another session's prefix", engine.SessionBranchPrefix + "hop-os-talos-1.13.4/version", sessionBot, []string{"versions/frank.yaml"}, false, "prefix"},
+		{"a longer id with this id as prefix", engine.SessionBranchPrefix + id + "-hotfix/version", sessionBot, []string{"versions/frank.yaml"}, false, "prefix"},
+		{"not the session bot", engine.SessionBranchPrefix + id + "/version", renovateBot, []string{"versions/frank.yaml"}, false, "author"},
+		{"outside its scope", engine.SessionBranchPrefix + id + "/version", sessionBot, []string{"versions/frank.yaml", "apps/grafana/values.yaml"}, false, "outside"},
+		{"touches the policy", engine.SessionBranchPrefix + id + "/version", sessionBot, []string{"update-policy.yaml"}, false, "sensitive"},
 	}
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

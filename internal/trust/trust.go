@@ -80,7 +80,7 @@ type Scope struct {
 	TargetRevisionOnly []string
 	Known              bool // false: the dependency's location is unknown
 	// BranchPrefix, for a session's or a revert's PR, is the one head
-	// branch prefix it may use (cluster-update/session-<id>-, …/revert-<n>-).
+	// branch prefix it may use (cluster-update/session-<id>/, …/revert-<n>-).
 	BranchPrefix string
 }
 
@@ -89,7 +89,9 @@ type Scope struct {
 func SessionScope(upgradeID string, it engine.Item) Scope {
 	it.Path = frankrepo.PathSession
 	s := ScopeFor(it)
-	s.BranchPrefix = engine.SessionBranchPrefix + upgradeID + "-"
+	// "/" can never occur in an upgrade id (a label value), so no session's
+	// prefix is a prefix of another's (sec2-3).
+	s.BranchPrefix = engine.SessionBranchPrefix + upgradeID + "/"
 	return s
 }
 

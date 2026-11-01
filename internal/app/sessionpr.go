@@ -16,7 +16,7 @@ import (
 
 // Session PRs are merged by the console, on the operator's click (spec
 // Part 2; c1c-r1). A session opens its PR on
-// cluster-update/session-<upgrade-id>-… with the session App's bot and never
+// cluster-update/session-<upgrade-id>/… with the session App's bot and never
 // merges it: it asks through the step API (request-merge). The console runs
 // the full trust check against THAT session's scope — session bot author,
 // its own branch prefix, verified commits pushed by the bot, files within

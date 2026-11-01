@@ -244,7 +244,7 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 	if instructions == "" {
 		instructions = "Read brief/brief.md first. Report each long step to the console with $CONSOLE_URL/api/sessions/$UPGRADE_ID/step " +
 			"(Authorization: Bearer the session-step-token from $CREDENTIALS_DIR). You may open PRs but NEVER merge one: push to a branch named " +
-			"cluster-update/session-$UPGRADE_ID-<topic> and POST {\"pr\": N} to $CONSOLE_URL/api/sessions/$UPGRADE_ID/request-merge; the operator " +
+			"cluster-update/session-$UPGRADE_ID/<topic> and POST {\"pr\": N} to $CONSOLE_URL/api/sessions/$UPGRADE_ID/request-merge; the operator " +
 			"merges it from the console. Finish by running the verification in the brief."
 	}
 	// Every forge- or cluster-sourced string is untrusted: the one-line title
@@ -261,7 +261,7 @@ func (a *App) plan(ctx context.Context, id, typ, cluster, app, title, rollback, 
 	fmt.Fprintf(&b, "- **Pinned clients:** talosctl %s, kubectl %s\n", talos, kubectl)
 	fmt.Fprintf(&b, "- **Rollback:** %s\n\n", rollback)
 	fmt.Fprintf(&b, "## Pull requests: you open them, the operator merges them\n\n"+
-		"You never merge a PR (your token cannot push to `main`). Open each PR from a branch named `%s%s-<topic>`, "+
+		"You never merge a PR (your token cannot push to `main`). Open each PR from a branch named `%s%s/<topic>`, "+
 		"commits signed and pushed by the session App, changing only files of this update. Then ask the console:\n\n"+
 		"```sh\ncurl -fsS -X POST \"$CONSOLE_URL/api/sessions/$UPGRADE_ID/request-merge\" \\\n"+
 		"  -H \"Authorization: Bearer $(cat \"$CREDENTIALS_DIR/session-step-token\")\" -d '{\"pr\": <number>}'\n```\n\n"+

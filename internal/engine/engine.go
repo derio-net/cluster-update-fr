@@ -29,7 +29,8 @@ const ApproverAuto = "auto"
 const BatchBranchPrefix = "cluster-update/batch-"
 
 // SessionBranchPrefix starts every upgrade session's PR branch:
-// cluster-update/session-<upgrade-id>-<anything> (session App bot author).
+// cluster-update/session-<upgrade-id>/<topic> (session App bot author). The
+// "/" separator cannot occur in an upgrade id, so prefixes never collide.
 const SessionBranchPrefix = "cluster-update/session-"
 
 // RevertBranchPrefix starts every console revert PR branch:
