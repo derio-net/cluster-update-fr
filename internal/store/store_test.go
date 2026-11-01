@@ -217,6 +217,30 @@ func TestReconcileNamesEveryLeftover(t *testing.T) {
 	}
 }
 
+// c1c-r6: a failed update is where the operator REPAIRS it — often from its
+// session. Its pod is not reaped; only terminal states and unknown ids are.
+func TestReconcileKeepsTheSessionOfAFailedUpdate(t *testing.T) {
+	s, _ := open(t)
+	s.Track(Update{ID: "frank-os-1", Title: "x"})
+	_ = s.Transition("frank-os-1", Failed, "verifier", "failed at step smoke", nil)
+	s.Track(Update{ID: "pr-4", Title: "y", PR: 4})
+	_ = s.Transition("pr-4", Abandoned, "x", "gone", nil)
+	out := s.Reconcile(ReconcileInput{OpenPRs: map[int]bool{}, SessionPods: []live.Pod{
+		{Name: "us-repair", Labels: map[string]string{"fr.run/id": "frank-os-1"}},
+		{Name: "us-done", Labels: map[string]string{"fr.run/id": "pr-4"}},
+	}})
+	got := map[string]bool{}
+	for _, c := range out {
+		got[c.Target] = true
+	}
+	if got["us-repair"] {
+		t.Error("the session repairing a failed update was reaped")
+	}
+	if !got["us-done"] {
+		t.Error("the session of a terminal update must be reaped")
+	}
+}
+
 func TestConcurrentUse(t *testing.T) {
 	s, _ := open(t)
 	var wg sync.WaitGroup

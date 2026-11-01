@@ -586,7 +586,9 @@ func (s *Store) Reconcile(in ReconcileInput) []Cleanup {
 	for _, p := range in.SessionPods {
 		id := p.Labels["fr.run/id"]
 		u, ok := s.d.Updates[id]
-		if !ok || u.State.Terminal() || u.State == Failed {
+		// Only terminal or unknown ids: a FAILED update is being repaired,
+		// often from this very session (c1c-r6).
+		if !ok || u.State.Terminal() {
 			out = append(out, Cleanup{Kind: CleanupPod, Target: p.Name, Reason: "no open update for session " + id})
 		}
 	}
