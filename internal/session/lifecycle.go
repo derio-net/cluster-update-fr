@@ -187,7 +187,12 @@ type Orphan struct{ Kind, Name, Reason string }
 func (l *Launcher) ReconcileOrphans(ctx context.Context) ([]Orphan, error) {
 	l.startMu.Lock()
 	defer l.startMu.Unlock()
-	recs := l.records()
+	recs, ok := l.recordsChecked()
+	if !ok || l.Store.Warning != "" {
+		// Fail closed (sec2-10): with no trustworthy record of the running
+		// sessions, nothing is an orphan — not a pod, Secret or lock.
+		return nil, errors.New("session records unreadable (or the state was reset); orphan reconciliation skipped")
+	}
 	var out []Orphan
 	sel := "?labelSelector=" + url.QueryEscape(kube.ManagedByLabel+"="+kube.ManagedBy)
 	for _, res := range []string{"pods", "secrets"} {

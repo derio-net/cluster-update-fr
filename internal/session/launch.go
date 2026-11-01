@@ -154,9 +154,23 @@ func (l *Launcher) now() time.Time {
 }
 
 func (l *Launcher) records() map[string]Record {
-	m := map[string]Record{}
-	l.Store.GetBlob(sessionBlob, &m)
+	m, _ := l.recordsChecked()
 	return m
+}
+
+// recordsChecked also reports whether the records were READ: an absent
+// blob is "no sessions" (true); a present but undecodable one is not —
+// nothing may be deleted as an orphan on its strength (sec2-10).
+func (l *Launcher) recordsChecked() (map[string]Record, bool) {
+	m := map[string]Record{}
+	raw, ok := l.Store.RawBlob(sessionBlob)
+	if !ok {
+		return m, true
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return map[string]Record{}, false
+	}
+	return m, true
 }
 
 func (l *Launcher) update(fn func(m map[string]Record) error) error {

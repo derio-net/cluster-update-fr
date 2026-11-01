@@ -731,6 +731,35 @@ func TestStaleBranchCleanupFailsClosed(t *testing.T) {
 	}
 }
 
+type badPolicySource struct{ frankrepo.FSSource }
+
+func (s badPolicySource) Read(ctx context.Context, path string) ([]byte, error) {
+	if path == frankrepo.PolicyPath {
+		return nil, errors.New("github: 502")
+	}
+	return s.FSSource.Read(ctx, path)
+}
+
+// sec2-10: with the update policy unreadable the required CI contexts are
+// unknown, so nothing passes CI and nothing merges — no fallback default.
+func TestUnreadablePolicyMergesNothing(t *testing.T) {
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	a.Repo = badPolicySource{frankrepo.FSSource{Root: "../../testdata/frank"}}
+	v := a.Cycle(context.Background())
+	if mergedPR(gh, 7) {
+		t.Fatal("merged with the update policy unreadable")
+	}
+	for _, it := range v.Items {
+		if it.CI == "passed" || !strings.Contains(it.CIDetail, "policy unreadable") {
+			t.Errorf("%s: CI %s (%s) with the required contexts unknown", it.ID, it.CI, it.CIDetail)
+		}
+	}
+	if len(v.Items) == 0 {
+		t.Fatal("precondition: the PR is still listed")
+	}
+}
+
 type containsAll struct{}
 
 func (containsAll) Contains(context.Context, string, string) (bool, error) { return true, nil }

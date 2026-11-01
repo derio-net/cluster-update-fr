@@ -653,6 +653,15 @@ func (s *Store) UpdateBlob(key string, fn func(cur json.RawMessage) (json.RawMes
 	return nil
 }
 
+// RawBlob returns a blob's stored bytes undecoded (false if absent), so a
+// caller can tell "absent" from "present but unreadable".
+func (s *Store) RawBlob(key string) (json.RawMessage, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.d.Blobs[key]
+	return append(json.RawMessage(nil), b...), ok
+}
+
 // UpdateJSON is UpdateBlob for a typed value: fn mutates the decoded value
 // in place, atomically under the store lock (read-modify-write races between
 // writers are impossible; the state flock makes this process the only one).
@@ -768,6 +777,11 @@ func (s *Store) Reconcile(in ReconcileInput) ([]Cleanup, []error) {
 		}
 	}
 	for _, p := range in.SessionPods {
+		if s.Warning != "" {
+			// The state was reset (unreadable file moved aside): every id
+			// looks unknown, which proves nothing — reap no pod (sec2-10).
+			break
+		}
 		id := p.Labels["fr.run/id"]
 		u, ok := s.d.Updates[id]
 		// Only terminal or unknown ids: a FAILED update is being repaired,

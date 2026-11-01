@@ -148,6 +148,24 @@ func TestPersistenceAndCorruptFile(t *testing.T) {
 	}
 }
 
+// sec2-10: after a corrupt state file was moved aside, every session id
+// looks unknown — that proves nothing, so no session pod is reaped.
+func TestNoPodReapedAfterAStateReset(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, func() time.Time { return t0 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	out, _ := s.Reconcile(ReconcileInput{SessionPods: []live.Pod{{Name: "us-live", Labels: map[string]string{"fr.run/id": "frank-os-1"}}}})
+	if len(out) != 0 {
+		t.Fatalf("reaped after a reset: %+v", out)
+	}
+}
+
 // sec2-6: a merge is never recorded onto a terminal update.
 func TestMarkMergedRefusesTerminalUpdates(t *testing.T) {
 	for _, st := range []State{Verified, RolledBack, Abandoned} {

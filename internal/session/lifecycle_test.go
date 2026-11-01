@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -333,6 +334,22 @@ func TestReconcileOrphans(t *testing.T) {
 	}
 	if len(orphans) != 5 {
 		t.Errorf("orphans = %+v", orphans)
+	}
+}
+
+// sec2-10: unreadable session records make nothing an orphan.
+func TestOrphansNotReapedWhenRecordsAreUnreadable(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	start(t, l, "pr-1", TypeChartMajor)
+	_ = l.Store.UpdateBlob(sessionBlob, func(json.RawMessage) (json.RawMessage, error) { return json.RawMessage(`{"pr-1": 7}`), nil })
+	n := len(k.objects)
+	if _, err := l.ReconcileOrphans(context.Background()); err == nil {
+		t.Fatal("orphan reconciliation ran on unreadable records")
+	}
+	if len(k.objects) != n {
+		t.Fatalf("objects deleted on unreadable records: %d → %d", n, len(k.objects))
 	}
 }
 

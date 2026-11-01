@@ -412,6 +412,11 @@ func (a *App) Cycle(ctx context.Context) View {
 	statuses := map[string][]forge.Status{}
 	pushes := map[string]time.Time{}
 	verdict := func(p forge.PR) (cidiag.Verdict, string) {
+		// Without the policy, the required CI contexts are unknown: CI
+		// cannot pass (sec2-10) rather than falling back to a weaker default.
+		if !v.declOK || decl.Errors[frankrepo.PolicyPath] != "" {
+			return cidiag.Pending, "update policy unreadable: required CI unknown, nothing merges"
+		}
 		st, ok := statuses[p.HeadSHA]
 		if !ok && a.GitHub != nil {
 			if st, err = a.GitHub.Statuses(ctx, p.HeadSHA); err != nil {
