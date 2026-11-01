@@ -15,12 +15,13 @@ const bot = "renovate-frank[bot]"
 const console = "cluster-update-fr[bot]"
 
 type fakeAPI struct {
-	prs     map[int]forge.PR
-	commits map[int][]forge.Commit
-	files   map[int][]string
-	pushes  map[string]forge.Push
-	patches map[int]map[string]forge.FilePatch
-	merged  []string
+	prs      map[int]forge.PR
+	commits  map[int][]forge.Commit
+	files    map[int][]string
+	pushes   map[string]forge.Push
+	patches  map[int]map[string]forge.FilePatch
+	compared []string // base...head of every Compare
+	merged   []string
 }
 
 func (f *fakeAPI) LastPush(_ context.Context, branch string) (forge.Push, error) {
@@ -43,6 +44,22 @@ func (f *fakeAPI) PRCommits(_ context.Context, n int) ([]forge.Commit, error) {
 func (f *fakeAPI) PRFiles(_ context.Context, n int) ([]string, error) { return f.files[n], nil }
 func (f *fakeAPI) PRPatches(_ context.Context, n int) (map[string]forge.FilePatch, error) {
 	return f.patches[n], nil
+}
+
+// Compare answers for the PR whose head is exactly head (the verified SHA).
+func (f *fakeAPI) Compare(_ context.Context, base, head string) ([]forge.ChangedFile, error) {
+	f.compared = append(f.compared, base+"..."+head)
+	for n, pr := range f.prs {
+		if pr.HeadSHA != head {
+			continue
+		}
+		var out []forge.ChangedFile
+		for _, name := range f.files[n] {
+			out = append(out, forge.ChangedFile{Name: name, FilePatch: f.patches[n][name]})
+		}
+		return out, nil
+	}
+	return nil, forge.ErrNotFound
 }
 
 func cfg() Config {
@@ -75,6 +92,10 @@ func TestTrustedRenovatePR(t *testing.T) {
 	a := api(7, pr, botCommit, []string{"apps/homepage/manifests/deployment.yaml"})
 	if err := cfg().Check(context.Background(), a, pr, ScopeFor(homepage())); err != nil {
 		t.Fatalf("a genuine Renovate PR was refused: %v", err)
+	}
+	// c1d-r10: the files are read at the verified head against the base.
+	if len(a.compared) != 1 || a.compared[0] != "main...head" {
+		t.Errorf("compared = %v", a.compared)
 	}
 }
 

@@ -579,19 +579,37 @@ type FilePatch struct {
 	Patch  string // "" when GitHub omits it (binary, too large)
 }
 
-// PRPatches returns each changed file's status and patch, by path.
-func (g *GitHub) PRPatches(ctx context.Context, n int) (map[string]FilePatch, error) {
-	var raw []struct {
-		Filename string `json:"filename"`
-		Status   string `json:"status"`
-		Patch    string `json:"patch"`
+// ChangedFile is one file a comparison changes.
+type ChangedFile struct {
+	Name, Previous string
+	FilePatch
+}
+
+// maxCompareFiles is GitHub's cap on a comparison's file list; reaching it
+// means the list may be incomplete, which is an error, never "complete".
+const maxCompareFiles = 300
+
+// Compare lists the files (with status and patch) that head changes
+// relative to base — read at the exact verified SHA, not from the live PR,
+// which can move after verification (c1d-r10).
+func (g *GitHub) Compare(ctx context.Context, base, head string) ([]ChangedFile, error) {
+	var raw struct {
+		Files []struct {
+			Filename         string `json:"filename"`
+			PreviousFilename string `json:"previous_filename"`
+			Status           string `json:"status"`
+			Patch            string `json:"patch"`
+		} `json:"files"`
 	}
-	if err := g.c().do(ctx, http.MethodGet, g.repo(fmt.Sprintf("/pulls/%d/files?per_page=100", n)), nil, &raw, false); err != nil {
+	if err := g.c().do(ctx, http.MethodGet, g.repo("/compare/"+url.PathEscape(base)+"..."+url.PathEscape(head)), nil, &raw, false); err != nil {
 		return nil, err
 	}
-	out := map[string]FilePatch{}
-	for _, f := range raw {
-		out[f.Filename] = FilePatch{Status: f.Status, Patch: f.Patch}
+	if len(raw.Files) >= maxCompareFiles {
+		return nil, fmt.Errorf("%w: comparison lists %d files", ErrTruncated, len(raw.Files))
+	}
+	out := make([]ChangedFile, 0, len(raw.Files))
+	for _, f := range raw.Files {
+		out = append(out, ChangedFile{Name: f.Filename, Previous: f.PreviousFilename, FilePatch: FilePatch{Status: f.Status, Patch: f.Patch}})
 	}
 	return out, nil
 }

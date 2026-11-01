@@ -382,13 +382,14 @@ func TestOpenPRsPaginateAndHasOpenPR(t *testing.T) {
 	}
 }
 
-func TestPRPatches(t *testing.T) {
+// c1d-r10: changed files come from compare/<base>...<verified sha>.
+func TestCompareAtTheVerifiedSHA(t *testing.T) {
 	srv, _ := fake(t, map[string]string{
-		"GET /repos/derio-net/frank/pulls/7/files": `[{"filename":"apps/root/templates/grafana.yaml","status":"modified","patch":"@@ -1 +1 @@\n-    targetRevision: 1\n+    targetRevision: 2"}]`,
+		"GET /repos/derio-net/frank/compare/main...abc123": `{"files":[{"filename":"apps/root/templates/grafana.yaml","status":"modified","patch":"@@ -1 +1 @@\n-    targetRevision: 1\n+    targetRevision: 2"}]}`,
 	})
-	ps, err := gh(srv, "t").PRPatches(context.Background(), 7)
-	if p := ps["apps/root/templates/grafana.yaml"]; err != nil || p.Status != "modified" || !strings.Contains(p.Patch, "+    targetRevision: 2") {
-		t.Fatalf("patches = %+v %v", ps, err)
+	cs, err := gh(srv, "t").Compare(context.Background(), "main", "abc123")
+	if err != nil || len(cs) != 1 || cs[0].Name != "apps/root/templates/grafana.yaml" || cs[0].Status != "modified" || !strings.Contains(cs[0].Patch, "+    targetRevision: 2") {
+		t.Fatalf("compare = %+v %v", cs, err)
 	}
 }
 

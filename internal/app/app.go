@@ -39,7 +39,7 @@ type GitHubAPI interface {
 	Releases(ctx context.Context, ownerRepo string) ([]string, error)
 	PRCommits(ctx context.Context, n int) ([]forge.Commit, error)
 	PRFiles(ctx context.Context, n int) ([]string, error)
-	PRPatches(ctx context.Context, n int) (map[string]forge.FilePatch, error)
+	Compare(ctx context.Context, base, head string) ([]forge.ChangedFile, error)
 	Branches(ctx context.Context, prefix string) ([]string, error)
 	HasOpenPR(ctx context.Context, branch string) (bool, error)
 	DeleteBranch(ctx context.Context, branch string) error

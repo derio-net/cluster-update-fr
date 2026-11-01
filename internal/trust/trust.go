@@ -65,8 +65,8 @@ func (c Config) base() string {
 type API interface {
 	PR(ctx context.Context, n int) (forge.PR, error)
 	PRCommits(ctx context.Context, n int) ([]forge.Commit, error)
-	PRFiles(ctx context.Context, n int) ([]string, error)
-	PRPatches(ctx context.Context, n int) (map[string]forge.FilePatch, error)
+	// Compare is the change at the VERIFIED head against the base (c1d-r10).
+	Compare(ctx context.Context, base, head string) ([]forge.ChangedFile, error)
 	LastPush(ctx context.Context, branch string) (forge.Push, error)
 }
 
@@ -291,22 +291,27 @@ func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) er
 	if !scope.Known {
 		return errors.New("the dependency's location in the repo is unknown, so its changed files cannot be checked")
 	}
-	files, err := api.PRFiles(ctx, pr.Number)
+	// The changed files are read at the verified head SHA (compare
+	// base...sha), never from the live PR, which may have moved since.
+	changed, err := api.Compare(ctx, pr.BaseRef, pr.HeadSHA)
 	if err != nil {
 		return fmt.Errorf("changed files unreadable: %w", err)
 	}
-	var patches map[string]forge.FilePatch
+	var files []string
+	patches := map[string]forge.FilePatch{}
+	for _, c := range changed {
+		files = append(files, c.Name)
+		patches[c.Name] = c.FilePatch
+		if c.Previous != "" {
+			files = append(files, c.Previous)
+		}
+	}
 	for _, f := range files {
 		if within(f, sensitive) {
 			if within(f, scope.Sensitive) {
 				continue
 			}
 			if exactly(f, scope.TargetRevisionOnly) {
-				if patches == nil {
-					if patches, err = api.PRPatches(ctx, pr.Number); err != nil {
-						return fmt.Errorf("patches unreadable: %w", err)
-					}
-				}
 				if err := targetRevisionOnly(patches[f]); err != nil {
 					return fmt.Errorf("touches sensitive path %s: it %v", f, err)
 				}

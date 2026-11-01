@@ -54,6 +54,7 @@ type fakeGitHub struct {
 	created  []int
 	restored map[string][]string
 	branches []string // console branches on GitHub
+	patches  map[int]map[string]forge.FilePatch
 	deleted  []string
 	// openErr fails OpenPRs; openHeads are branches GitHub reports an open
 	// PR for when asked per head; headErr fails that per-head ask.
@@ -111,8 +112,27 @@ func (g *fakeGitHub) LastPush(_ context.Context, branch string) (forge.Push, err
 	return forge.Push{}, forge.ErrNotFound
 }
 
-func (g *fakeGitHub) PRPatches(context.Context, int) (map[string]forge.FilePatch, error) {
-	return map[string]forge.FilePatch{}, nil
+// Compare answers for the PR whose head is head: its files (patches with
+// the diff given in g.patches, if any).
+func (g *fakeGitHub) Compare(ctx context.Context, _, head string) ([]forge.ChangedFile, error) {
+	g.mu.Lock()
+	n := 0
+	for _, p := range g.prs {
+		if p.HeadSHA == head {
+			n = p.Number
+		}
+	}
+	patches := g.patches[n]
+	g.mu.Unlock()
+	if n == 0 {
+		return nil, forge.ErrNotFound
+	}
+	files, _ := g.PRFiles(ctx, n)
+	var out []forge.ChangedFile
+	for _, f := range files {
+		out = append(out, forge.ChangedFile{Name: f, FilePatch: patches[f]})
+	}
+	return out, nil
 }
 
 func (g *fakeGitHub) PRFiles(_ context.Context, n int) ([]string, error) {
