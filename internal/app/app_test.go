@@ -99,6 +99,9 @@ func (g *fakeGitHub) OpenPRs(context.Context) ([]forge.PR, error) {
 			gone = gone || m == p.Number
 		}
 		if !gone {
+			if p.BaseRef == "" {
+				p.BaseRef = "main" // GitHub always reports the base
+			}
 			out = append(out, p)
 		}
 	}
@@ -116,6 +119,9 @@ func (g *fakeGitHub) PR(_ context.Context, n int) (forge.PR, error) {
 		if p.Number == n {
 			if g.moveTo != "" {
 				p.HeadSHA = g.moveTo
+			}
+			if p.BaseRef == "" {
+				p.BaseRef = "main"
 			}
 			return p, nil
 		}

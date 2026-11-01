@@ -50,6 +50,14 @@ type Config struct {
 	RenovateBot string   // login of the Renovate GitHub App bot
 	ConsoleBot  string   // login of the console's GitHub App bot
 	Committers  []string // extra committer logins allowed (e.g. web-flow)
+	BaseBranch  string   // the only base an item's PR may target ("" = main)
+}
+
+func (c Config) base() string {
+	if c.BaseBranch == "" {
+		return "main"
+	}
+	return c.BaseBranch
 }
 
 // API is what verification reads.
@@ -69,7 +77,10 @@ type Scope struct {
 
 // sensitive paths need the session path AND the matching dependency.
 var sensitive = []string{".github/", ".gitea/", "scripts/", "apps/root/", "apps/cluster-update-fr/", "apps/upgrade-sessions/",
-	"apps/renovate/", "update-policy.yaml", "renovate.json", "renovate.json5", ".renovaterc"}
+	"apps/renovate/", "update-policy.yaml", "renovate.json", "renovate.json5", ".renovaterc",
+	// Hop's own app-of-apps and updater paths (c1s-r10).
+	"clusters/hop/apps/root/", "clusters/hop/apps/renovate/", "clusters/hop/apps/cluster-update-fr/", "clusters/hop/apps/upgrade-sessions/",
+	"clusters/hop/renovate.json", "clusters/hop/renovate.json5"}
 
 var sensitiveApps = map[string]bool{"cluster-update-fr": true, "upgrade-sessions": true, "renovate": true}
 
@@ -147,6 +158,9 @@ func (c Config) Check(ctx context.Context, api API, pr forge.PR, scope Scope) er
 	// (b)
 	if pr.HeadRepo == "" || !strings.EqualFold(pr.HeadRepo, c.Repo) || (pr.BaseRepo != "" && !strings.EqualFold(pr.BaseRepo, c.Repo)) {
 		return fmt.Errorf("head branch is in a fork (%q), not %s", pr.HeadRepo, c.Repo)
+	}
+	if pr.BaseRef != c.base() {
+		return fmt.Errorf("base branch %q is not %s", pr.BaseRef, c.base())
 	}
 	if !batch && !strings.HasPrefix(pr.HeadRef, "renovate/") {
 		return fmt.Errorf("branch %q does not start with renovate/ or %s", pr.HeadRef, engine.BatchBranchPrefix)

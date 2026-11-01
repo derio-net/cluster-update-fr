@@ -46,7 +46,7 @@ func cfg() Config {
 }
 
 func goodPR(n int) forge.PR {
-	return forge.PR{Number: n, Author: bot, HeadRef: "renovate/homepage-1.x", HeadSHA: "head", HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank",
+	return forge.PR{Number: n, Author: bot, HeadRef: "renovate/homepage-1.x", HeadSHA: "head", HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank", BaseRef: "main",
 		Title: "Update ghcr.io/gethomepage/homepage to v1.4.1"}
 }
 
@@ -129,6 +129,15 @@ func TestEveryConditionRefuses(t *testing.T) {
 		{"bot PR touching the update policy", func(_ *forge.PR, _ *[]forge.Commit, f *[]string) { *f = []string{"update-policy.yaml"} }, nil, "update-policy"},
 		{"bot PR touching another app", func(_ *forge.PR, _ *[]forge.Commit, f *[]string) { *f = []string{"apps/grafana/values.yaml"} }, nil, "outside"},
 		{"wrong branch prefix", func(p *forge.PR, _ *[]forge.Commit, _ *[]string) { p.HeadRef = "feature/x" }, nil, "branch"},
+		// c1s-r10: a bot PR into another base is not an update of main
+		{"base is not main", func(p *forge.PR, _ *[]forge.Commit, _ *[]string) { p.BaseRef = "release" }, nil, "base"},
+		{"base unknown", func(p *forge.PR, _ *[]forge.Commit, _ *[]string) { p.BaseRef = "" }, nil, "base"},
+		{"bot PR touching Hop's root app-of-apps", func(_ *forge.PR, _ *[]forge.Commit, f *[]string) {
+			*f = []string{"clusters/hop/apps/root/templates/caddy.yaml"}
+		}, nil, "sensitive"},
+		{"bot PR touching Hop's Renovate", func(_ *forge.PR, _ *[]forge.Commit, f *[]string) {
+			*f = []string{"clusters/hop/apps/renovate/values.yaml"}
+		}, nil, "sensitive"},
 		{"head moved after the commits were listed", func(p *forge.PR, _ *[]forge.Commit, _ *[]string) { p.HeadSHA = "newer" }, nil, "head"},
 		{"bot login not configured", nil, func(c *Config) { c.RenovateBot = "" }, "not configured"},
 	}
@@ -238,7 +247,7 @@ func TestOSAndOmniScopes(t *testing.T) {
 
 func TestBatchPRs(t *testing.T) {
 	ctx := context.Background()
-	pr := forge.PR{Number: 100, Author: console, HeadRef: engine.BatchBranchPrefix + "20261031", HeadSHA: "m2", HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank"}
+	pr := forge.PR{Number: 100, Author: console, HeadRef: engine.BatchBranchPrefix + "20261031", HeadSHA: "m2", HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank", BaseRef: "main"}
 	commits := []forge.Commit{signed("r1", bot, "web-flow"), signed("m2", console, "web-flow")}
 	a := api(100, pr, commits, []string{"apps/homepage/x.yaml", "apps/grafana/values.yaml"})
 	scope := Union(ScopeFor(homepage()), ScopeFor(engine.Item{Kind: "image", Cluster: "frank", App: "grafana", Path: frankrepo.PathBatchApprove}))

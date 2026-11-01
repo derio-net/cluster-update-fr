@@ -175,7 +175,8 @@ func (a *App) eng(policy frankrepo.Policy) *engine.Engine {
 }
 
 func (a *App) trustConfig() trust.Config {
-	return trust.Config{Repo: a.Cfg.FrankRepo, RenovateBot: a.Cfg.RenovateBot, ConsoleBot: a.Cfg.ConsoleBot, Committers: a.Cfg.TrustedCommitters}
+	return trust.Config{Repo: a.Cfg.FrankRepo, RenovateBot: a.Cfg.RenovateBot, ConsoleBot: a.Cfg.ConsoleBot, Committers: a.Cfg.TrustedCommitters,
+		BaseBranch: a.Cfg.FrankRef}
 }
 
 // trusted keeps the items whose PR passes every trust condition, lists the
