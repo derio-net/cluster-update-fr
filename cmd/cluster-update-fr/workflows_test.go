@@ -10,9 +10,11 @@ import (
 )
 
 type workflow struct {
-	Jobs map[string]struct {
-		If    string `yaml:"if"`
-		Steps []struct {
+	Permissions map[string]string `yaml:"permissions"`
+	Jobs        map[string]struct {
+		If          string            `yaml:"if"`
+		Permissions map[string]string `yaml:"permissions"`
+		Steps       []struct {
 			Uses string         `yaml:"uses"`
 			With map[string]any `yaml:"with"`
 		} `yaml:"steps"`
@@ -65,12 +67,39 @@ func TestActionsAndBasesArePinned(t *testing.T) {
 		}
 	}
 	raw, _ := os.ReadFile("../../.github/workflows/release.yml")
-	digestNoted = strings.Contains(string(raw), "steps.build.outputs.digest") && strings.Contains(string(raw), "gh release")
+	digestNoted = strings.Contains(string(raw), "needs.image.outputs.digest") && strings.Contains(string(raw), "gh release")
 	if !attested {
 		t.Error("build-push-action must set provenance: true and sbom: true")
 	}
 	if !digestNoted {
 		t.Error("the release must write the pushed image digest into the release notes")
+	}
+}
+
+// Least privilege: read-only by default; only a job that checks nothing out
+// may write the repository; checkouts never persist the token.
+func TestWorkflowPermissionsAreLeast(t *testing.T) {
+	for _, name := range []string{"ci.yml", "release.yml"} {
+		w := readWorkflow(t, name)
+		for k, v := range w.Permissions {
+			if v != "read" && v != "none" {
+				t.Errorf("%s: workflow-level permission %s: %s (must be read-only)", name, k, v)
+			}
+		}
+		for job, j := range w.Jobs {
+			checksOut := false
+			for _, s := range j.Steps {
+				if strings.HasPrefix(s.Uses, "actions/checkout@") {
+					checksOut = true
+					if s.With["persist-credentials"] != false {
+						t.Errorf("%s/%s: checkout must set persist-credentials: false", name, job)
+					}
+				}
+			}
+			if checksOut && j.Permissions["contents"] == "write" {
+				t.Errorf("%s/%s: a job running checked-out code must not get contents: write", name, job)
+			}
+		}
 	}
 }
 
