@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -249,7 +250,9 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	labels := map[string]string{LabelRunID: req.UpgradeID, LabelType: req.Type, kube.ManagedByLabel: kube.ManagedBy}
 	secret := func(name string, d map[string]string) map[string]any {
 		return map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-			"metadata": map[string]any{"name": name, "namespace": l.Namespace, "labels": labels}, "stringData": d}
+			"metadata": map[string]any{"name": name, "namespace": l.Namespace, "labels": labels,
+				"annotations": map[string]string{AnnotationOwner: req.UpgradeID, AnnotationContentHash: contentHash(d)}},
+			"stringData": d}
 	}
 	brief := map[string]string{"brief.md": req.Brief, "AGENTS.md": req.Instructions, "CLAUDE.md": req.Instructions}
 	created := []struct{ res, name string }{}
@@ -263,20 +266,21 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	}
 	for _, obj := range []struct {
 		res, name string
+		content   map[string]string // nil for the pod
 		body      any
 	}{
-		{"secrets", SecretName(req.UpgradeID), secret(SecretName(req.UpgradeID), data)},
-		{"secrets", BriefName(req.UpgradeID), secret(BriefName(req.UpgradeID), brief)},
-		{"pods", pod, l.podSpec(req, pod, labels)},
+		{"secrets", SecretName(req.UpgradeID), data, secret(SecretName(req.UpgradeID), data)},
+		{"secrets", BriefName(req.UpgradeID), brief, secret(BriefName(req.UpgradeID), brief)},
+		{"pods", pod, nil, l.podSpec(req, pod, labels)},
 	} {
-		if err := l.Kube.Create(ctx, l.Namespace, obj.res, obj.body); err != nil {
-			if kube.IsConflict(err) && obj.res != "pods" {
-				continue
-			}
+		adopted, err := l.createOwned(ctx, req.UpgradeID, obj.res, obj.name, obj.content, obj.body)
+		if err != nil {
 			rollback()
 			return Record{}, false, err
 		}
-		created = append(created, struct{ res, name string }{obj.res, obj.name})
+		if !adopted {
+			created = append(created, struct{ res, name string }{obj.res, obj.name})
+		}
 	}
 	l.mu.Lock()
 	if l.sets == nil {
@@ -287,6 +291,79 @@ func (l *Launcher) Start(ctx context.Context, req Request) (Record, bool, error)
 	_ = l.Store.Edit(req.UpgradeID, func(u *store.Update) { u.Session = pod })
 	l.Store.AddEvent(store.Event{Update: req.UpgradeID, Action: "session-started", Reason: req.Type + " session " + pod})
 	return rec, true, nil
+}
+
+// Ownership annotations on every Secret the console creates.
+const (
+	AnnotationOwner       = "cluster-update.fr/upgrade-id"
+	AnnotationContentHash = "cluster-update.fr/content-hash"
+)
+
+// ErrForeignObject: a session object name is taken by something the console
+// will not mount (c1s-r2).
+var ErrForeignObject = errors.New("session: an object with the session's name exists and is not this session's")
+
+func contentHash(d map[string]string) string {
+	keys := make([]string, 0, len(d))
+	for k := range d {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, k := range keys {
+		fmt.Fprintf(h, "%d:%s=%d:%s\n", len(k), k, len(d[k]), d[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// createOwned creates an object; on AlreadyExists it never mounts what it
+// finds blindly (c1s-r2). A Secret is adopted only when it is the console's
+// (managed-by label), this session's (owner annotation = upgrade id) AND its
+// LIVE content hashes to exactly what would have been written. A stale one
+// of ours (owner matches, content does not) is deleted and recreated. A
+// pod is never adopted on a create conflict (its live spec carries server
+// defaults and cannot be compared); a stale one of ours is replaced. Any
+// object that is not ours fails the start loudly.
+func (l *Launcher) createOwned(ctx context.Context, id, res, name string, content map[string]string, body any) (adopted bool, err error) {
+	err = l.Kube.Create(ctx, l.Namespace, res, body)
+	if err == nil || !kube.IsConflict(err) {
+		return false, err
+	}
+	var live struct {
+		Metadata kube.Meta         `json:"metadata"`
+		Data     map[string]string `json:"data"`
+	}
+	if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, res, name), &live); err != nil {
+		return false, fmt.Errorf("session: %s/%s exists but is unreadable: %w", res, name, err)
+	}
+	ours := live.Metadata.Labels[kube.ManagedByLabel] == kube.ManagedBy && live.Metadata.Annotations[AnnotationOwner] == id
+	if res == "pods" && live.Metadata.Labels[kube.ManagedByLabel] == kube.ManagedBy && live.Metadata.Labels[LabelRunID] == id {
+		ours = true
+	}
+	if !ours {
+		l.Store.AddEvent(store.Event{Update: id, Action: "session-refused", Reason: res + "/" + name + " exists and is not this session's"})
+		return false, fmt.Errorf("%w: %s/%s", ErrForeignObject, res, name)
+	}
+	if content != nil {
+		decoded := map[string]string{}
+		ok := true
+		for k, v := range live.Data {
+			b, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				ok = false
+				break
+			}
+			decoded[k] = string(b)
+		}
+		if ok && live.Metadata.Annotations[AnnotationContentHash] == contentHash(content) && contentHash(decoded) == contentHash(content) {
+			return true, nil
+		}
+	}
+	if err := l.Kube.Delete(ctx, l.Namespace, res, name); err != nil && !kube.IsNotFound(err) {
+		return false, fmt.Errorf("session: stale %s/%s could not be replaced: %w", res, name, err)
+	}
+	l.Store.AddEvent(store.Event{Update: id, Action: "session-replaced-stale", Reason: res + "/" + name})
+	return false, l.Kube.Create(ctx, l.Namespace, res, body)
 }
 
 // adopt rebuilds the record of a running pod that has none, from its creds
@@ -301,11 +378,23 @@ func (l *Launcher) adopt(ctx context.Context, req Request, target, pod string) (
 	if err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "secrets", SecretName(req.UpgradeID)), &sec); err != nil {
 		return Record{}, fmt.Errorf("creds Secret unreadable: %w", err)
 	}
-	if sec.Metadata.Labels[kube.ManagedByLabel] != kube.ManagedBy || sec.Metadata.Labels[LabelRunID] != req.UpgradeID {
+	if sec.Metadata.Labels[kube.ManagedByLabel] != kube.ManagedBy || sec.Metadata.Labels[LabelRunID] != req.UpgradeID ||
+		sec.Metadata.Annotations[AnnotationOwner] != req.UpgradeID {
 		return Record{}, errors.New("creds Secret is not this session's")
 	}
-	tok, err := base64.StdEncoding.DecodeString(sec.Data[StepTokenKey])
-	if err != nil || len(tok) == 0 {
+	decoded := map[string]string{}
+	for k, v := range sec.Data {
+		b, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return Record{}, errors.New("creds Secret is not decodable")
+		}
+		decoded[k] = string(b)
+	}
+	if contentHash(decoded) != sec.Metadata.Annotations[AnnotationContentHash] {
+		return Record{}, errors.New("creds Secret content does not match the hash the console wrote")
+	}
+	tok := []byte(decoded[StepTokenKey])
+	if len(tok) == 0 {
 		return Record{}, errors.New("creds Secret holds no step token")
 	}
 	sum := sha256.Sum256(tok)

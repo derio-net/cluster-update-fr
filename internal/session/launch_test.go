@@ -317,6 +317,52 @@ func TestLockAndRecordAreSavedBeforeThePod(t *testing.T) {
 	}
 }
 
+// c1s-r2: an existing object under a session's Secret name is never mounted
+// blindly. A pre-planted (unlabelled) or other-session Secret fails the
+// start loudly; a stale Secret of this session is replaced, so the pod
+// mounts exactly the token whose hash the record holds.
+func TestSecretNameConflictsAreNeverAdoptedBlindly(t *testing.T) {
+	now := time.Unix(1000, 0)
+	managed := map[string]any{kube.ManagedByLabel: kube.ManagedBy, LabelRunID: "pr-4"}
+	for name, planted := range map[string]map[string]any{
+		"unlabelled":    {"name": SecretName("pr-4")},
+		"other session": {"name": SecretName("pr-4"), "labels": managed, "annotations": map[string]any{AnnotationOwner: "pr-99"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k := newFake()
+			l := launcher(t, k, &now)
+			k.objects["secrets/"+SecretName("pr-4")] = map[string]any{"metadata": planted, "stringData": map[string]any{StepTokenKey: "attacker"}}
+			_, _, err := l.Start(context.Background(), req("pr-4", TypeChartMajor, "grafana"))
+			if !errors.Is(err, ErrForeignObject) {
+				t.Fatalf("Start over a foreign Secret: %v", err)
+			}
+			if _, ok := k.objects["pods/"+PodName("pr-4")]; ok {
+				t.Error("a pod was created mounting a Secret the console did not write")
+			}
+			if _, ok := l.Get("pr-4"); ok {
+				t.Error("record left behind")
+			}
+		})
+	}
+	t.Run("stale of ours", func(t *testing.T) {
+		k := newFake()
+		l := launcher(t, k, &now)
+		k.objects["secrets/"+SecretName("pr-4")] = map[string]any{
+			"metadata":   map[string]any{"name": SecretName("pr-4"), "labels": managed, "annotations": map[string]any{AnnotationOwner: "pr-4", AnnotationContentHash: "old"}},
+			"stringData": map[string]any{StepTokenKey: "old-token"}}
+		if _, created, err := l.Start(context.Background(), req("pr-4", TypeChartMajor, "grafana")); err != nil || !created {
+			t.Fatalf("Start: created=%v err=%v", created, err)
+		}
+		sd := k.objects["secrets/"+SecretName("pr-4")]["stringData"].(map[string]any)
+		if sd[StepTokenKey] != l.StepToken("pr-4") {
+			t.Errorf("mounted token %v is not the recorded one", sd[StepTokenKey])
+		}
+		if err := l.StepStarted("pr-4", l.StepToken("pr-4"), "x"); err != nil {
+			t.Errorf("step reporting broken: %v", err)
+		}
+	})
+}
+
 type podHook struct {
 	*fakeKube
 	before func()
