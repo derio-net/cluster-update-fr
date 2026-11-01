@@ -61,6 +61,26 @@ func (f *fakeKube) Create(_ context.Context, ns, res string, obj any) error {
 	return nil
 }
 
+// DeleteUID: the exact object by uid, labels ignored; another uid → 409.
+func (f *fakeKube) DeleteUID(_ context.Context, ns, res, name, uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ns != f.policy.SessionNamespace || uid == "" {
+		return kube.ErrForbiddenWrite
+	}
+	k := res + "/" + name
+	f.deletes = append(f.deletes, k)
+	m, ok := f.objects[k]
+	if !ok {
+		return &kube.APIError{Code: 404, Reason: "NotFound"}
+	}
+	if m["metadata"].(map[string]any)["uid"] != uid {
+		return &kube.APIError{Code: 409, Reason: "Conflict"}
+	}
+	delete(f.objects, k)
+	return nil
+}
+
 func (f *fakeKube) Delete(_ context.Context, ns, res, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -301,12 +301,23 @@ func (l *Launcher) EndScrubbed(ctx context.Context, id, outcome, by, transcript 
 	rec, ok := l.Get(id)
 	set := l.Scrubber(id)
 	outcome = l.boundedScrub(set, outcome, "outcome")
-	cerr := l.cleanup(ctx, PodName(id))
+	var cerr error
+	if ok {
+		cerr = l.cleanupRecord(ctx, rec)
+	} else {
+		cerr = l.cleanup(ctx, PodName(id))
+	}
 	if cerr != nil && !errors.Is(cerr, kube.ErrForbiddenWrite) {
 		return outcome, cerr // API trouble: keep the record, retry next tick
 	}
 	if !ok {
 		return outcome, cerr
+	}
+	// Never drop the record, token or lock while an object the console
+	// created for this session still exists (c1d-r1): the next cycle
+	// retries, and a second session cannot start on the same target.
+	if left := l.recordedLeft(ctx, rec); left != "" {
+		return outcome, fmt.Errorf("session: %s still exists; the session stays recorded until it is gone", left)
 	}
 	Locks{Store: l.Store}.Release(rec.Target, id)
 	_ = l.update(func(m map[string]Record) error { delete(m, id); return nil })
@@ -404,9 +415,59 @@ func (l *Launcher) CleanupPod(ctx context.Context, pod, reason string) error {
 // managed-by label) is refused by the kube client; cleanup carries on with
 // the rest and returns an error wrapping kube.ErrForbiddenWrite naming it.
 func (l *Launcher) cleanup(ctx context.Context, pod string) error {
+	return l.cleanupObjects(ctx, pod, nil, "")
+}
+
+// cleanupRecord deletes a recorded session's objects: those whose uid was
+// recorded at create are deleted by uid precondition WHATEVER their labels
+// say now (c1d-r1); others fall back to the label-checked delete.
+func (l *Launcher) cleanupRecord(ctx context.Context, rec Record) error {
+	return l.cleanupObjects(ctx, rec.Pod, rec.SecretUIDs, rec.PodUID)
+}
+
+// recordedLeft names an object with a recorded uid that still exists as
+// that very object ("" when none). Unreadable counts as still there.
+func (l *Launcher) recordedLeft(ctx context.Context, rec Record) string {
+	objs := map[string]string{"pods/" + rec.Pod: rec.PodUID}
+	for name, uid := range rec.SecretUIDs {
+		objs["secrets/"+name] = uid
+	}
+	for key, uid := range objs {
+		if uid == "" {
+			continue
+		}
+		res, name, _ := strings.Cut(key, "/")
+		var live struct {
+			Metadata kube.Meta `json:"metadata"`
+		}
+		err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, res, name), &live)
+		switch {
+		case kube.IsNotFound(err):
+		case err != nil:
+			return key + " (unreadable)"
+		case live.Metadata.UID == uid:
+			return key
+		}
+	}
+	return ""
+}
+
+func (l *Launcher) cleanupObjects(ctx context.Context, pod string, secretUIDs map[string]string, podUID string) error {
+	uidOf := map[string]string{"pods/" + pod: podUID}
+	for name, uid := range secretUIDs {
+		uidOf["secrets/"+name] = uid
+	}
 	var foreign []string
 	for _, o := range []struct{ res, name string }{{"pods", pod}, {"secrets", pod + "-creds"}, {"secrets", pod + "-brief"}} {
-		err := l.Kube.Delete(ctx, l.Namespace, o.res, o.name)
+		var err error
+		if uid := uidOf[o.res+"/"+o.name]; uid != "" {
+			err = l.Kube.DeleteUID(ctx, l.Namespace, o.res, o.name, uid)
+			if kube.IsConflict(err) { // the uid precondition failed: not our object any more
+				err = kube.ErrForbiddenWrite
+			}
+		} else {
+			err = l.Kube.Delete(ctx, l.Namespace, o.res, o.name)
+		}
 		switch {
 		case err == nil || kube.IsNotFound(err):
 		case errors.Is(err, kube.ErrForbiddenWrite):

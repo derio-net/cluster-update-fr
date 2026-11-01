@@ -358,6 +358,45 @@ type stuckDelete struct{ *fakeKube }
 func (s stuckDelete) Delete(_ context.Context, _, res, _ string) error {
 	return &kube.APIError{Code: 500, Reason: "InternalError"}
 }
+func (s stuckDelete) DeleteUID(_ context.Context, _, _, _, _ string) error {
+	return &kube.APIError{Code: 500, Reason: "InternalError"}
+}
+
+// c1d-r1: stripping the managed-by label from a running session pod does
+// not shield it: it is deleted by its recorded uid; and while it cannot be
+// deleted the record and lock stay, so no second session can start.
+func TestStrippedLabelDoesNotShieldTheSessionPod(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	l.HardCeiling = 16 * time.Hour
+	start(t, l, "pr-1", TypeChartMajor)
+	pod := k.objects["pods/"+PodName("pr-1")]
+	delete(pod["metadata"].(map[string]any)["labels"].(map[string]any), kube.ManagedByLabel)
+	now = now.Add(17 * time.Hour)
+	l.Tick(context.Background())
+	if _, ok := k.objects["pods/"+PodName("pr-1")]; ok {
+		t.Fatal("a session pod with a stripped label survived the hard ceiling")
+	}
+	if _, ok := l.Get("pr-1"); ok {
+		t.Error("record kept after its pod was deleted")
+	}
+
+	// Deletion impossible: the record and the lock stay.
+	k2 := newFake()
+	l2 := launcher(t, k2, &now)
+	start(t, l2, "pr-2", TypeChartMajor)
+	l2.Kube = stuckDelete{k2}
+	if err := l2.End(context.Background(), "pr-2", "ended", "derio", ""); err == nil {
+		t.Fatal("End reported success with the pod still there")
+	}
+	if _, ok := l2.Get("pr-2"); !ok {
+		t.Fatal("record dropped while the pod still exists")
+	}
+	if (Locks{Store: l2.Store}).Holder(Target(TypeChartMajor, "frank", "litellm")) != "pr-2" {
+		t.Fatal("lock released while the pod still exists")
+	}
+}
 
 // A cleanup that keeps failing alarms once, not once per cycle; when it
 // finally completes (a state change) it alarms again.

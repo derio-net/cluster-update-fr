@@ -305,6 +305,9 @@ func (k *memKube) Delete(_ context.Context, _, res, name string) error {
 	delete(k.objs, res+"/"+name)
 	return nil
 }
+func (k *memKube) DeleteUID(ctx context.Context, ns, res, name, _ string) error {
+	return k.Delete(ctx, ns, res, name)
+}
 
 const prBody = "| Package | Change |\n|---|---|\n| [%s](x) | `%s` -> `%s` |\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box"
 

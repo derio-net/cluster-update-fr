@@ -162,6 +162,32 @@ func TestRoleBindingCreateIsRefused(t *testing.T) {
 	}
 }
 
+// c1d-r1: an object whose uid the console recorded is deleted with that uid
+// as a precondition whatever its labels now say; no uid → refused.
+func TestDeleteUIDIgnoresLabelsButPinsTheUID(t *testing.T) {
+	var body string
+	c, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+	})
+	c.Writes = &WritePolicy{SessionNamespace: "upgrade-sessions"}
+	if err := c.DeleteUID(context.Background(), "upgrade-sessions", "pods", "us-x", ""); !errors.Is(err, ErrForbiddenWrite) {
+		t.Fatalf("no uid: %v", err)
+	}
+	if err := c.DeleteUID(context.Background(), "kube-system", "pods", "us-x", "u1"); !errors.Is(err, ErrForbiddenWrite) {
+		t.Fatalf("other namespace: %v", err)
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Fatalf("refused deletes sent %d requests", n)
+	}
+	if err := c.DeleteUID(context.Background(), "upgrade-sessions", "pods", "us-x", "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, `"uid":"u1"`) {
+		t.Errorf("delete body = %s", body)
+	}
+}
+
 // A delete reads the object first and refuses one the console did not make;
 // the delete it does send is pinned to the uid it checked.
 func TestDeleteNeedsTheManagedByLabel(t *testing.T) {

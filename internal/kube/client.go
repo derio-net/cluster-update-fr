@@ -287,6 +287,19 @@ func (c *Client) Delete(ctx context.Context, ns, resource, name string) error {
 	return c.do(ctx, http.MethodDelete, ObjectPath(ns, resource, name), opts, nil)
 }
 
+// DeleteUID removes ns/resource/name only if it is still the exact object
+// with uid — the console recorded that uid when it created the object, so
+// it is the console's whatever its labels say now (a stripped managed-by
+// label cannot shield it). The delete carries a uid precondition, so a
+// swapped object is never touched. Name/namespace/resource policy applies.
+func (c *Client) DeleteUID(ctx context.Context, ns, resource, name, uid string) error {
+	if uid == "" || !c.Writes.allows(VerbDelete, ns, resource, name) {
+		return ErrForbiddenWrite
+	}
+	opts, _ := json.Marshal(map[string]any{"propagationPolicy": "Background", "preconditions": map[string]string{"uid": uid}})
+	return c.do(ctx, http.MethodDelete, ObjectPath(ns, resource, name), opts, nil)
+}
+
 // ObjectPath is the GET path of one namespaced object (segments escaped).
 func ObjectPath(ns, resource, name string) string {
 	return collection(ns, resource) + "/" + url.PathEscape(name)

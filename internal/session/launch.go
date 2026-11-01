@@ -28,6 +28,9 @@ type Kube interface {
 	Get(ctx context.Context, path string, out any) error
 	Create(ctx context.Context, ns, resource string, obj any) error
 	Delete(ctx context.Context, ns, resource, name string) error
+	// DeleteUID deletes the exact object with uid (precondition), whatever
+	// its labels — for objects whose uid the console recorded at create.
+	DeleteUID(ctx context.Context, ns, resource, name, uid string) error
 }
 
 // Credentials injected per type: file names under CredDir (mounted by frank
