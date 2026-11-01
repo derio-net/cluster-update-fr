@@ -17,8 +17,9 @@
 //     all its ancestors are merged on the original text and redacted once.
 //     Process-wide credentials go through Register; each session gets its
 //     own Set whose parent is the process-wide one.
-//  2. Patterns (this file) — the SECOND line, for secrets the console never
-//     saw (a token an agent pasted, a key printed by a tool).
+//  2. Patterns (this file, matched by engine.go) — the SECOND line, for
+//     secrets the console never saw (a token an agent pasted, a key printed
+//     by a tool).
 //
 // Transcripts go through Transcript, which first strips terminal escape
 // sequences (a colour code inside a token would otherwise split it).
@@ -42,40 +43,39 @@
 // derio-net/frank's scripts/life_scrub.py; keep the two pattern sets in step.
 //
 // Rules that keep the pattern table free of bypasses (RE2 has no lookaround):
-//   - no pattern CONSUMES a boundary character — boundaries are checked in
-//     code against the bytes around the match, so a match never eats the
-//     separator its neighbour needs;
+//   - no pattern CONSUMES a boundary character, and no pattern carries a \b:
+//     the left boundary is checked in code against the byte before the match
+//     (notBefore), so a match never eats the separator its neighbour needs,
+//     and a byte that belongs to another secret never rejects a match;
 //   - no pattern is anchored to end of line — a value ends at whitespace, a
 //     quote or (trimmed in code) a trailing comma or brace;
-//   - over-redaction is preferred to under-redaction: floors are low.
-//
-// Every pattern is matched against the SAME text, overlapping matches
-// included, and the accepted spans are unioned: a pattern whose value class
-// swallows the start of an adjacent token can never hide that token from its
-// own pattern, and a token whose left boundary is the tail of an adjacent
-// secret is accepted (p5-relay-3). Redaction then repeats until stable.
+//   - over-redaction is preferred to under-redaction: floors are low, and
+//     every limit (work, rounds, time) fails closed by redacting.
 package scrub
 
 import (
 	"encoding/base64"
 	"io"
 	"regexp"
-	"sort"
 	"strings"
 )
 
+// pattern is one credential shape. Every match starts where begins says; re is
+// the whole pattern anchored at that start, its capture group 1 the secret
+// (text outside it — a key name, a scheme word — stays readable).
 type pattern struct {
 	kind string
-	// re's capture group 1 is the secret; text outside it (a key name, a
-	// scheme word) is kept so redacted output stays readable.
-	re *regexp.Regexp
+	// begins reports, by plain byte comparison (no regexp — the start index
+	// is one linear byte scan), whether a match can begin at text[p].
+	begins func(text string, p int) bool
+	re     *regexp.Regexp // ^whole pattern
 	// notBefore rejects a match whose preceding byte is in this set — unless
 	// that byte belongs to another accepted secret (adjacent tokens).
 	notBefore string
-	// glued (key/value patterns) is re matched at an exact position, without
-	// the \b an adjacent secret's tail defeats; tried only inside accepted
-	// secret spans.
-	glued *regexp.Regexp
+	// reach bounds how far a match beginning at s can extend; re only ever
+	// sees that window (linear work), and a capture that fills a window cut
+	// by the cap is extended to the end of its run (fail closed).
+	reach func(text string, s int) (end int, capped bool)
 	// classify refines the kind from the secret (optional).
 	classify func(secret string) string
 	// trimRight strips these trailing bytes from the secret span (a
@@ -88,7 +88,11 @@ type pattern struct {
 	codeNoise bool
 }
 
-const secretKeys = `(?:token|access_token|refresh_token|client-key-data|client-certificate-data|key|crt|ca|password|passwd|pass|secret|client_secret|private_key|api_key|apikey)`
+// keyNames are the key/value keys that name a secret (case-insensitive).
+var keyNames = []string{"token", "access_token", "refresh_token", "client-key-data", "client-certificate-data", "key", "crt", "ca",
+	"password", "passwd", "pass", "secret", "client_secret", "private_key", "api_key", "apikey"}
+
+var secretKeys = `(?:` + strings.Join(keyNames, "|") + `)`
 
 const (
 	alnum      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -97,19 +101,26 @@ const (
 	b64Chars   = alnum + "_+/-"
 )
 
+// sep is the key/value separator: ':' or '=', optionally followed by a line
+// break and the indentation of a block-style value.
+const sep = `[ \t]*[:=][ \t]*(?:\r?\n[ \t]+)?`
+
+func mk(kind string, begins func(string, int) bool, body, notBefore string, reach func(string, int) (int, bool)) pattern {
+	return pattern{kind: kind, begins: begins, notBefore: notBefore, reach: reach, re: regexp.MustCompile(`^(?:` + body + `)`)}
+}
+
 var patterns = []pattern{
-	{kind: "private-key", re: regexp.MustCompile(`(-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)`)},
-	{kind: "jwt", re: regexp.MustCompile(`(eyJ[A-Za-z0-9_+/=-]{20,}(?:\.[A-Za-z0-9_+/=-]+)*)`), notBefore: b64Chars, classify: classifyEyJ},
-	{kind: "github-pat", re: regexp.MustCompile(`(github_pat_[A-Za-z0-9_]{22,})`), notBefore: wordChars},
-	{kind: "github-token", re: regexp.MustCompile(`((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,})`), notBefore: wordChars},
-	{kind: "api-key", re: regexp.MustCompile(`(sk-[A-Za-z0-9_-]{20,})`), notBefore: tokenChars},
+	mk("private-key", lit("-----BEGIN "),
+		`(-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)`, "", reachFar),
+	withClassify(mk("jwt", lit("eyJ"), `(eyJ[A-Za-z0-9_+/=-]{20,}(?:\.[A-Za-z0-9_+/=-]+)*)`, b64Chars, reachRun), classifyEyJ),
+	mk("github-pat", lit("github_pat_"), `(github_pat_[A-Za-z0-9_]{22,})`, wordChars, reachRun),
+	mk("github-token", ghToken, `((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,})`, wordChars, reachRun),
+	mk("api-key", lit("sk-"), `(sk-[A-Za-z0-9_-]{20,})`, tokenChars, reachRun),
 	// Exactly 35 secret characters: a longer run is redacted at its first 35,
 	// which over-redacts harmlessly instead of leaking an adjacent token.
-	{kind: "telegram-bot-token", re: regexp.MustCompile(`([0-9]{6,12}:[A-Za-z0-9_-]{35})`), notBefore: "0123456789"},
-	// The scheme word starts at \b — or, glued to a previous secret
-	// ("…xyzBearer abc…"), inside its span (p5-relay-3).
-	bounded("bearer", `bearer\s+([A-Za-z0-9._~+/=-]{8,})`),
-	bounded("gitea-token", `token\s+([0-9a-f]{40})`),
+	mk("telegram-bot-token", telegramID, `([0-9]{6,12}:[A-Za-z0-9_-]{35})`, "0123456789", reachRun),
+	mk("bearer", wordThenSpace("bearer"), `(?i)bearer\s+([A-Za-z0-9._~+/=-]{8,})`, wordChars, reachWord),
+	mk("gitea-token", wordThenSpace("token"), `(?i)token\s+([0-9a-f]{40})`, wordChars, reachWord),
 	// key/value secrets (YAML, JSON, env). Quoted values run to the matching
 	// quote, so '#', ',' and '}' inside a secret are redacted with it.
 	// Unquoted values run to whitespace (so " #" starts a comment but "a#b"
@@ -120,8 +131,8 @@ var patterns = []pattern{
 	//
 	// A value may sit on the NEXT, indented line (YAML block style), hence
 	// sep. An opening quote with no closing quote on its line redacts to end
-	// of line (the unclosed-quote fallbacks run after the closed forms, and an
-	// already-redacted value is skipped by isMarker).
+	// of line (the unclosed-quote forms; overlaps with the closed form merge,
+	// and an already-redacted value is skipped by isMarker).
 	keyValue(`"([^"\n]{8,})"`, "", false),
 	keyValue(`'([^'\n]{8,})'`, "", false),
 	keyValue(`"([^"\n]{8,})`, "", false),
@@ -129,26 +140,13 @@ var patterns = []pattern{
 	keyValue(`([^\s"'`+"`"+`]{8,})`, ",}", true),
 }
 
-// keyValue builds a key/value pattern. Its key must start at a word
-// boundary (\b, cheap to scan with) — except right after another secret:
-// "…<token>password: v" has no boundary before "password", so glued, the
-// same pattern anchored and without \b, is re-tried inside every accepted
-// secret span (p5-relay-3).
+func withClassify(p pattern, f func(string) string) pattern { p.classify = f; return p }
+
 func keyValue(value, trimRight string, codeNoise bool) pattern {
-	p := bounded("yaml-secret", secretKeys+`["']?`+sep+value)
+	p := mk("yaml-secret", keyThenSep, `(?i)`+secretKeys+`["']?`+sep+value, wordChars, reachKV)
 	p.trimRight, p.codeNoise = trimRight, codeNoise
 	return p
 }
-
-// bounded: a case-insensitive pattern starting at a word boundary, with its
-// glued form for a start inside another secret.
-func bounded(kind, body string) pattern {
-	return pattern{kind: kind, re: regexp.MustCompile(`(?i)\b` + body), glued: regexp.MustCompile(`(?i)^(?:` + body + `)`)}
-}
-
-// sep is the key/value separator: ':' or '=', optionally followed by a line
-// break and the indentation of a block-style value.
-const sep = `[ \t]*[:=][ \t]*(?:\r?\n[ \t]+)?`
 
 // classifyEyJ tells an Omni service-account key (base64 JSON carrying a PGP
 // private key) from a JWT; both are redacted.
@@ -171,177 +169,6 @@ func marker(kind string) string { return "«redacted:" + kind + "»" }
 // value is never redacted again (keeps String idempotent and Find clean).
 func isMarker(s string) bool {
 	return strings.HasPrefix(s, "«redacted:") && strings.HasSuffix(s, "»") && strings.Count(s, "«") == 1
-}
-
-type hit struct {
-	start, end int
-	kind       string
-}
-
-// candidate is one regex match of a pattern; boundaryOK says whether its
-// left boundary (notBefore) holds on its own.
-type candidate struct {
-	hit
-	from       int // where the left boundary is checked
-	boundaryOK bool
-}
-
-// candidates returns every match of p in text, overlapping ones included:
-// scanning resumes one byte after each match's START, never at its end. A
-// greedy value class can swallow the prefix of an ADJACENT token (ghp_…
-// eating the next "ghp", sk-… the next "sk") and resuming at the end would
-// then never see that token, leaking its tail — the adjacent-token boundary
-// bug, first found in the Telegram pattern. Overlaps are merged later.
-func (p pattern) candidates(text string) []candidate {
-	var out []candidate
-	pos := 0
-	for pos < len(text) {
-		m := p.re.FindStringSubmatchIndex(text[pos:])
-		if m == nil || m[2] < 0 {
-			break
-		}
-		start, end := pos+m[2], pos+m[3]
-		if p.trimRight != "" {
-			for end > start && strings.IndexByte(p.trimRight, text[end-1]) >= 0 {
-				end--
-			}
-		}
-		if end > start && !isMarker(text[start:end]) {
-			kind := p.kind
-			if p.classify != nil {
-				kind = p.classify(text[start:end])
-			}
-			ok := p.notBefore == "" || start == 0 || strings.IndexByte(p.notBefore, text[start-1]) < 0
-			out = append(out, candidate{hit{start, end, kind}, start, ok})
-		}
-		pos += m[0] + 1
-	}
-	return out
-}
-
-// gluedAt tries p's glued form at exactly position k (a key that starts
-// inside another secret).
-func (p pattern) gluedAt(text string, k int) (hit, bool) {
-	m := p.glued.FindStringSubmatchIndex(text[k:])
-	if m == nil || m[2] < 0 {
-		return hit{}, false
-	}
-	start, end := k+m[2], k+m[3]
-	for p.trimRight != "" && end > start && strings.IndexByte(p.trimRight, text[end-1]) >= 0 {
-		end--
-	}
-	if end <= start || isMarker(text[start:end]) {
-		return hit{}, false
-	}
-	return hit{start, end, p.kind}, true
-}
-
-// spans matches EVERY pattern against the same text and accepts a
-// candidate whose left boundary holds, or whose start touches or lies
-// inside an accepted span (the byte before it is part of another secret,
-// so the boundary rule must not reject it — e.g. two tokens back to back).
-// Accepted spans are merged where they overlap.
-func spans(text string, skipCodeNoise bool) []hit {
-	var all []candidate
-	for _, p := range patterns {
-		if skipCodeNoise && p.codeNoise {
-			continue
-		}
-		all = append(all, p.candidates(text)...)
-	}
-	if len(all) == 0 {
-		return nil
-	}
-	// In boundary order: whether a candidate's boundary byte lies in (or right
-	// after) an accepted secret depends only on candidates checked earlier.
-	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].from != all[j].from {
-			return all[i].from < all[j].from
-		}
-		return all[i].end > all[j].end
-	})
-	var acc []hit
-	maxEnd := -1 // furthest end of an accepted span whose boundary precedes the current group
-	for i := 0; i < len(all); {
-		j, groupEnd := i, maxEnd
-		for ; j < len(all) && all[j].from == all[i].from; j++ {
-			c := all[j]
-			if c.boundaryOK || (c.from > 0 && maxEnd >= c.from) {
-				acc = append(acc, c.hit)
-				if c.end > groupEnd {
-					groupEnd = c.end
-				}
-			}
-		}
-		maxEnd, i = groupEnd, j
-	}
-	if len(acc) == 0 {
-		return nil
-	}
-	// A key/value pair whose key starts inside (or right after) an accepted
-	// secret has no \b before it: try the glued forms at each such position.
-	// New hits are scanned in turn, so a chain of glued pairs is followed.
-	tried := map[int]bool{}
-	for q := 0; q < len(acc); q++ {
-		h := acc[q]
-		for k := h.start + 1; k <= h.end && k < len(text); k++ {
-			if tried[k] || strings.IndexByte(wordChars, text[k-1]) < 0 {
-				continue // already tried, or a \b is there and the main scan saw it
-			}
-			tried[k] = true
-			for _, p := range patterns {
-				if p.glued == nil || (skipCodeNoise && p.codeNoise) {
-					continue
-				}
-				if g, ok := p.gluedAt(text, k); ok {
-					acc = append(acc, g)
-				}
-			}
-		}
-	}
-	sort.SliceStable(acc, func(i, j int) bool {
-		if acc[i].start != acc[j].start {
-			return acc[i].start < acc[j].start
-		}
-		return acc[i].end > acc[j].end
-	})
-	merged := []hit{acc[0]}
-	for _, h := range acc[1:] {
-		last := &merged[len(merged)-1]
-		if h.start < last.end {
-			if h.end > last.end {
-				last.end = h.end
-			}
-			continue
-		}
-		merged = append(merged, h)
-	}
-	return merged
-}
-
-// apply redacts until stable, calling seen for every redacted hit.
-func apply(text string, seen func(kind string)) string {
-	return applyPatterns(text, seen, false)
-}
-
-func applyPatterns(text string, seen func(kind string), skipCodeNoise bool) string {
-	for i := 0; i < 8; i++ {
-		hits := spans(text, skipCodeNoise)
-		if hits == nil {
-			break
-		}
-		var b strings.Builder
-		last := 0
-		for _, h := range hits {
-			seen(h.kind)
-			b.WriteString(text[last:h.start])
-			b.WriteString(marker(h.kind))
-			last = h.end
-		}
-		b.WriteString(text[last:])
-		text = b.String()
-	}
-	return text
 }
 
 // String returns text with every credential replaced by «redacted:<kind>»:
