@@ -139,6 +139,11 @@ type Engine struct {
 	// (cidiag.Diagnose / cidiag.Recover bound to the forges).
 	Diagnose func(ctx context.Context, pr forge.PR) cidiag.Diagnosis
 	Act      func(ctx context.Context, pr forge.PR, d cidiag.Diagnosis) (cidiag.Action, error)
+	// DiffType reads a PR's update type from its DIFF at the head SHA
+	// (renovate.DiffUpdateType over the compare patches). The body's type
+	// is never used for the path when this is set; "" means the diff cannot
+	// be classified and the item takes the session path (c1d-r3).
+	DiffType func(pr forge.PR) (updateType, reason string)
 }
 
 // Errors.
@@ -197,10 +202,18 @@ func (e *Engine) Build(prs []forge.PR, verdict func(forge.PR) (cidiag.Verdict, s
 		} else {
 			it.ID = ItemID(p.Number)
 		}
-		it.Deps = renovate.ParsePR(p.Body)
+		it.Deps = renovate.ParsePR(p.Body) // display + dependency NAME only
 		it.Security = renovate.IsSecurity(p.Title, p.Body, p.Labels)
 		it.Path = ""
+		diffType, diffWhy, useDiff := "", "", e.DiffType != nil && !isBatch
+		if useDiff {
+			diffType, diffWhy = e.DiffType(p)
+		}
 		for i, d := range it.Deps {
+			if useDiff {
+				d.UpdateType = diffType // never the body's (c1d-r3)
+				it.Deps[i].UpdateType = diffType
+			}
 			path, reason, kind, cluster, app, stateful, vulns := e.classify(inv, d)
 			if i == 0 {
 				it.Name, it.From, it.To, it.UpdateType = d.Name, d.From, d.To, d.UpdateType
@@ -218,6 +231,14 @@ func (e *Engine) Build(prs []forge.PR, verdict func(forge.PR) (cidiag.Verdict, s
 				}
 			}
 			it.Vulns = append(it.Vulns, vulns...)
+		}
+		if useDiff && diffType == "" && len(it.Deps) > 0 {
+			// Unclassifiable diff: the session path (an operator runbook
+			// stays a runbook) — never an automatic one.
+			if it.Path != frankrepo.PathOperatorRunbook {
+				it.Path = frankrepo.PathSession
+			}
+			it.PathReason = "the diff could not be classified (" + diffWhy + "); session path"
 		}
 		if isBatch {
 			it.Path, it.PathReason = frankrepo.PathBatchApprove, "console batch"

@@ -22,6 +22,7 @@ import (
 	"github.com/derio-net/cluster-update-fr/internal/inventory"
 	"github.com/derio-net/cluster-update-fr/internal/live"
 	"github.com/derio-net/cluster-update-fr/internal/metrics"
+	"github.com/derio-net/cluster-update-fr/internal/renovate"
 	"github.com/derio-net/cluster-update-fr/internal/scrub"
 	"github.com/derio-net/cluster-update-fr/internal/session"
 	"github.com/derio-net/cluster-update-fr/internal/store"
@@ -408,6 +409,28 @@ func (a *App) Cycle(ctx context.Context) View {
 		}
 	}
 	e.Inventory = func() *inventory.Inventory { return inv }
+	// The update type comes from the diff at the head SHA, never the PR
+	// body, which anyone with pull-requests:write can edit (c1d-r3).
+	diffTypes := map[string][2]string{}
+	e.DiffType = func(p forge.PR) (string, string) {
+		if r, ok := diffTypes[p.HeadSHA]; ok {
+			return r[0], r[1]
+		}
+		t, why := "", "diff unreadable"
+		if a.GitHub != nil {
+			if changed, err := a.GitHub.Compare(ctx, p.BaseRef, p.HeadSHA); err == nil {
+				var patches []string
+				for _, c := range changed {
+					patches = append(patches, c.Patch)
+				}
+				t, why = renovate.DiffUpdateType(patches)
+			} else {
+				why = "diff unreadable: " + scrub.String(err.Error())
+			}
+		}
+		diffTypes[p.HeadSHA] = [2]string{t, why}
+		return t, why
+	}
 
 	statuses := map[string][]forge.Status{}
 	pushes := map[string]time.Time{}

@@ -345,6 +345,9 @@ func newApp(t *testing.T, now *time.Time, hop bool) (*App, *fakeGitHub, *fakeSen
 		Number: 7, Title: "Update homepage", HeadSHA: "h7", HeadRef: "renovate/homepage", Author: renovateBot, HeadRepo: "derio-net/frank", BaseRepo: "derio-net/frank", CreatedAt: t0.Add(-48 * time.Hour), UpdatedAt: t0.Add(-48 * time.Hour),
 		Body: fmt.Sprintf(prBody, "ghcr.io/gethomepage/homepage", "v1.4.0", "v1.4.1"),
 	}}}
+	// The update type is read from the diff (c1d-r3): PR #7's real change.
+	gh.patches = map[int]map[string]forge.FilePatch{7: {"apps/homepage/manifests/deployment.yaml": {Status: "modified",
+		Patch: "@@ -20,7 +20,7 @@\n-          image: ghcr.io/gethomepage/homepage:v1.4.0\n+          image: ghcr.io/gethomepage/homepage:v1.4.1"}}}
 	tg := &fakeSender{}
 	k := &memKube{objs: map[string]map[string]any{}}
 	nowFn := func() time.Time { return *now }
@@ -780,6 +783,51 @@ func TestUnreadablePolicyMergesNothing(t *testing.T) {
 	}
 	if len(v.Items) == 0 {
 		t.Fatal("precondition: the PR is still listed")
+	}
+}
+
+// c1d-r3: the update type comes from the DIFF at the verified SHA. A body
+// claiming "patch" for a diff that is a major is not auto-merged; an edited
+// body changes nothing; an unclassifiable diff goes to the session path.
+func TestUpdateTypeComesFromTheDiffNotTheBody(t *testing.T) {
+	for name, c := range map[string]struct {
+		patch    string
+		wantPath string
+	}{
+		"body says patch, diff is a major": {"-          image: ghcr.io/gethomepage/homepage:v1.4.0\n+          image: ghcr.io/gethomepage/homepage:v2.0.0", frankrepo.PathSession},
+		"diff unclassifiable":              {"-  replicas: 1\n+  replicas: 2", frankrepo.PathSession},
+		"diff is the patch the body says":  {"-          image: ghcr.io/gethomepage/homepage:v1.4.0\n+          image: ghcr.io/gethomepage/homepage:v1.4.1", frankrepo.PathAutoMerge},
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := t0
+			a, gh, _, _ := newApp(t, &now, false)
+			gh.patches[7]["apps/homepage/manifests/deployment.yaml"] = forge.FilePatch{Status: "modified", Patch: c.patch}
+			v := a.Cycle(context.Background())
+			var it *engine.Item
+			for i := range v.Items {
+				if v.Items[i].ID == "pr-7" {
+					it = &v.Items[i]
+				}
+			}
+			if it == nil || it.Path != c.wantPath {
+				t.Fatalf("pr-7 = %+v, want path %s", it, c.wantPath)
+			}
+			if c.wantPath != frankrepo.PathAutoMerge && mergedPR(gh, 7) {
+				t.Fatal("auto-merged on the body's word")
+			}
+		})
+	}
+	// Editing the body to "patch" later (pull-requests:write) changes nothing.
+	now := t0
+	a, gh, _, _ := newApp(t, &now, false)
+	gh.patches[7]["apps/homepage/manifests/deployment.yaml"] = forge.FilePatch{Status: "modified",
+		Patch: "-          image: ghcr.io/gethomepage/homepage:v1.4.0\n+          image: ghcr.io/gethomepage/homepage:v2.0.0"}
+	gh.mu.Lock()
+	gh.prs[0].Body = fmt.Sprintf(prBody, "ghcr.io/gethomepage/homepage", "v1.4.0", "v1.4.1") + "\n\nThis PR contains the following updates: patch"
+	gh.mu.Unlock()
+	a.Cycle(context.Background())
+	if mergedPR(gh, 7) {
+		t.Fatal("an edited body reached auto-merge")
 	}
 }
 
