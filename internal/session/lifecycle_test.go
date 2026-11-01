@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +127,80 @@ func TestHardCeilingAndStepCapEndEvenMidStep(t *testing.T) {
 				t.Errorf("alarms = %v", a)
 			}
 		})
+	}
+}
+
+// Re-sending "start" while a step runs does not restart its clock.
+func TestRepeatedStepStartDoesNotExtendTheCap(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	l.StepCap = 4 * time.Hour
+	start(t, l, "pr-1", TypeChartMajor)
+	tok := l.StepToken("pr-1")
+	var ended []Ended
+	for i := 0; i < 5 && len(ended) == 0; i++ {
+		_ = l.StepStarted("pr-1", tok, fmt.Sprintf("helm upgrade %d", i))
+		now = now.Add(time.Hour + time.Minute)
+		ended = l.Tick(context.Background())
+	}
+	if len(ended) != 1 || !strings.Contains(ended[0].Outcome, "per-step cap") || !strings.Contains(ended[0].Outcome, "helm upgrade 0") {
+		t.Fatalf("ended = %+v", ended)
+	}
+}
+
+// Many short steps hit the per-session step-time cap, and a flood of step
+// starts hits the start-count cap.
+func TestTotalStepTimeAndStartCountCaps(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	l.StepCap, l.StepTotalCap = 4*time.Hour, 8*time.Hour
+	l.MaxLifetime, l.HardCeiling = 100*time.Hour, 200*time.Hour
+	start(t, l, "pr-2", TypeChartMajor)
+	tok := l.StepToken("pr-2")
+	var ended []Ended
+	for i := 0; i < 20 && len(ended) == 0; i++ {
+		_ = l.StepStarted("pr-2", tok, "step")
+		now = now.Add(3 * time.Hour)
+		_ = l.StepFinished("pr-2", tok)
+		ended = l.Tick(context.Background())
+	}
+	if len(ended) != 1 || !strings.Contains(ended[0].Outcome, "per-session cap") {
+		t.Fatalf("total cap: %+v", ended)
+	}
+
+	l.MaxStepStarts, l.StepTotalCap = 3, 0
+	start(t, l, "pr-3", TypeChartMajor)
+	tok = l.StepToken("pr-3")
+	for i := 0; i < 4; i++ {
+		_ = l.StepStarted("pr-3", tok, "s")
+		_ = l.StepFinished("pr-3", tok)
+	}
+	if ended = l.Tick(context.Background()); len(ended) != 1 || !strings.Contains(ended[0].Outcome, "step starts") {
+		t.Fatalf("start cap: %+v", ended)
+	}
+}
+
+// An ephemeral container (kubectl debug) added to a running session pod
+// ends the session at the next tick; and is refused at attach.
+func TestEphemeralContainerEndsTheSession(t *testing.T) {
+	now := time.Unix(0, 0)
+	k := newFake()
+	l := launcher(t, k, &now)
+	start(t, l, "pr-4", TypeChartMajor)
+	k.objects["pods/"+PodName("pr-4")]["spec"].(map[string]any)["ephemeralContainers"] = []any{map[string]any{"name": "debugger", "image": "busybox"}}
+	if _, _, err := l.Start(context.Background(), req("pr-4", TypeChartMajor, "litellm")); !errors.Is(err, ErrForeignObject) {
+		t.Fatalf("attach to a pod with an ephemeral container: %v", err)
+	}
+	start(t, l, "pr-5", TypeChartMajor)
+	k.objects["pods/"+PodName("pr-5")]["spec"].(map[string]any)["ephemeralContainers"] = []any{map[string]any{"name": "debugger"}}
+	ended := l.Tick(context.Background())
+	if len(ended) != 1 || !ended[0].Alarm || !strings.Contains(ended[0].Outcome, "ephemeral") {
+		t.Fatalf("tick: %+v", ended)
+	}
+	if _, ok := k.objects["secrets/"+SecretName("pr-5")]; ok {
+		t.Error("credentials survived")
 	}
 }
 

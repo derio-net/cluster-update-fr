@@ -80,7 +80,11 @@ type Config struct {
 	// reporting a step as running forever (c1s-r1).
 	HardCeiling time.Duration
 	StepCap     time.Duration
-	ReportHour  int // UTC hour of the daily report
+	// StepTotalCap bounds a session's summed step-running time (default =
+	// MaxLifetime) and MaxStepStarts its number of step starts (default 50).
+	StepTotalCap  time.Duration
+	MaxStepStarts int
+	ReportHour    int // UTC hour of the daily report
 
 	Telegram Telegram
 
@@ -170,6 +174,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		{"SESSION_MAX_LIFETIME", 8 * time.Hour, &c.MaxLifetime},
 		{"SESSION_HARD_CEILING", 0, &c.HardCeiling}, // 0 here = derive below
 		{"SESSION_STEP_CAP", 4 * time.Hour, &c.StepCap},
+		{"SESSION_STEP_TOTAL_CAP", 0, &c.StepTotalCap}, // 0 here = MaxLifetime
 	}
 	for _, d := range durations {
 		*d.dst = d.def
@@ -180,6 +185,17 @@ func Load(getenv func(string) string) (*Config, error) {
 			}
 			*d.dst = parsed
 		}
+	}
+	if c.StepTotalCap == 0 {
+		c.StepTotalCap = c.MaxLifetime
+	}
+	c.MaxStepStarts = 50
+	if v := strings.TrimSpace(getenv("SESSION_MAX_STEP_STARTS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("config: SESSION_MAX_STEP_STARTS=%q must be a positive integer", v)
+		}
+		c.MaxStepStarts = n
 	}
 	if c.HardCeiling == 0 {
 		c.HardCeiling = 2 * c.MaxLifetime

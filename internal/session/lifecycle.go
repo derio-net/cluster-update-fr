@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/derio-net/cluster-update-fr/internal/kube"
 	"github.com/derio-net/cluster-update-fr/internal/scrub"
@@ -35,10 +36,19 @@ func (l *Launcher) step(id, token string, running bool, name string) error {
 	now := l.now()
 	err := l.update(func(m map[string]Record) error {
 		r := m[id]
-		r.StepRunning, r.StepName, r.LastActivity = running, name, now
-		if running {
-			r.StepSince = now
+		switch {
+		case running && r.StepRunning:
+			// A repeated start while a step already runs neither restarts
+			// the step clock nor renames the step: re-sending "start" must
+			// not extend the per-step cap.
+		case running:
+			r.StepRunning, r.StepName, r.StepSince = true, name, now
+			r.StepStarts++
+		case r.StepRunning:
+			r.StepTotal += now.Sub(r.StepSince)
+			r.StepRunning, r.StepName = false, ""
 		}
+		r.LastActivity = now
 		m[id] = r
 		return nil
 	})
@@ -91,12 +101,30 @@ func (l *Launcher) Tick(ctx context.Context) []Ended {
 			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: step %q ran past the %s per-step cap", r.StepName, l.StepCap)))
 			continue
 		}
+		total := r.StepTotal
+		if r.StepRunning {
+			total += now.Sub(r.StepSince)
+		}
+		if l.StepTotalCap > 0 && total > l.StepTotalCap {
+			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: %s of step-running time passed the %s per-session cap", total.Round(time.Minute), l.StepTotalCap)))
+			continue
+		}
+		if l.MaxStepStarts > 0 && r.StepStarts > l.MaxStepStarts {
+			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: %d step starts passed the %d per-session cap", r.StepStarts, l.MaxStepStarts)))
+			continue
+		}
 		var pod livePod
 		err := l.Kube.Get(ctx, kube.ObjectPath(l.Namespace, "pods", r.Pod), &pod)
+		if err == nil && r.PodUID != "" {
+			// Full verification every tick: a replaced pod, a changed spec or
+			// an ephemeral container added after start (kubectl debug,
+			// sharing the credential volume) ends the session.
+			if why := l.verifyOwned(ctx, r, pod); why != "" {
+				ended = append(ended, l.endAlarm(ctx, r, "ended: the session pod failed verification: "+why))
+				continue
+			}
+		}
 		switch {
-		case err == nil && r.PodUID != "" && pod.Metadata.UID != r.PodUID:
-			ended = append(ended, l.endAlarm(ctx, r, fmt.Sprintf("ended: the session pod was replaced (UID %q, recorded %q)", pod.Metadata.UID, r.PodUID)))
-			continue
 		case kube.IsNotFound(err):
 			ended = append(ended, l.endFor(ctx, r, "needs you: the session pod disappeared"))
 			continue

@@ -64,19 +64,21 @@ type Request struct {
 
 // Record is a running session (persisted).
 type Record struct {
-	ID           string    `json:"id"`
-	Type         string    `json:"type"`
-	Target       string    `json:"target"`
-	Pod          string    `json:"pod"`
-	Cluster      string    `json:"cluster"`
-	App          string    `json:"app,omitempty"`
-	StartedAt    time.Time `json:"started_at"`
-	LastActivity time.Time `json:"last_activity"`
-	StepRunning  bool      `json:"step_running"`
-	StepName     string    `json:"step_name,omitempty"`
-	StepSince    time.Time `json:"step_since,omitempty"`
-	Warned       bool      `json:"warned"`
-	TokenHash    string    `json:"token_hash"`
+	ID           string        `json:"id"`
+	Type         string        `json:"type"`
+	Target       string        `json:"target"`
+	Pod          string        `json:"pod"`
+	Cluster      string        `json:"cluster"`
+	App          string        `json:"app,omitempty"`
+	StartedAt    time.Time     `json:"started_at"`
+	LastActivity time.Time     `json:"last_activity"`
+	StepRunning  bool          `json:"step_running"`
+	StepName     string        `json:"step_name,omitempty"`
+	StepSince    time.Time     `json:"step_since,omitempty"`
+	StepTotal    time.Duration `json:"step_total,omitempty"`  // finished steps' running time
+	StepStarts   int           `json:"step_starts,omitempty"` // steps started
+	Warned       bool          `json:"warned"`
+	TokenHash    string        `json:"token_hash"`
 	// What was created, recorded right after create: an attach proves the
 	// live pod and Secrets are still exactly these objects.
 	Image      string            `json:"image,omitempty"`
@@ -104,6 +106,11 @@ type Launcher struct {
 	MaxLifetime time.Duration
 	HardCeiling time.Duration // ends the session even mid-step (0 = off)
 	StepCap     time.Duration // ends a session whose one step runs longer (0 = off)
+	// StepTotalCap bounds the session's summed step-running time and
+	// MaxStepStarts the number of steps it may start (0 = off): many short
+	// steps cannot stand in for one long one.
+	StepTotalCap  time.Duration
+	MaxStepStarts int
 
 	startMu  sync.Mutex // serialises Start and the lifecycle Tick
 	mu       sync.Mutex
@@ -402,8 +409,9 @@ type livePod struct {
 		Containers         []struct {
 			Image string `json:"image"`
 		} `json:"containers"`
-		InitContainers []json.RawMessage `json:"initContainers"`
-		Volumes        []struct {
+		InitContainers      []json.RawMessage `json:"initContainers"`
+		EphemeralContainers []json.RawMessage `json:"ephemeralContainers"`
+		Volumes             []struct {
 			Name   string `json:"name"`
 			Secret *struct {
 				SecretName string `json:"secretName"`
@@ -424,6 +432,8 @@ func (l *Launcher) verifyOwned(ctx context.Context, rec Record, live livePod) st
 		return fmt.Sprintf("pod UID %q is not the recorded %q (the pod was replaced)", m.UID, rec.PodUID)
 	case m.Labels[kube.ManagedByLabel] != kube.ManagedBy || m.Labels[LabelRunID] != rec.ID || m.Labels[LabelType] != rec.Type:
 		return "pod labels are not this session's"
+	case len(live.Spec.EphemeralContainers) != 0:
+		return "an ephemeral container was added to the pod (it would share the credential volume)"
 	case len(live.Spec.Containers) != 1 || len(live.Spec.InitContainers) != 0 || live.Spec.Containers[0].Image != rec.Image:
 		return "pod containers/image differ from what the console created"
 	}

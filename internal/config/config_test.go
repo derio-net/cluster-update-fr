@@ -118,8 +118,11 @@ func TestSessionHardCeilingAndStepCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.HardCeiling != 16*time.Hour || c.StepCap != 4*time.Hour {
-		t.Errorf("defaults: ceiling %v, step cap %v", c.HardCeiling, c.StepCap)
+	if c.HardCeiling != 16*time.Hour || c.StepCap != 4*time.Hour || c.StepTotalCap != 8*time.Hour || c.MaxStepStarts != 50 {
+		t.Errorf("defaults: ceiling %v, step cap %v, total %v, starts %d", c.HardCeiling, c.StepCap, c.StepTotalCap, c.MaxStepStarts)
+	}
+	if _, err := Load(env(map[string]string{"SESSION_MAX_STEP_STARTS": "0"})); err == nil {
+		t.Error("zero step starts must be refused")
 	}
 	c, _ = Load(env(map[string]string{"SESSION_MAX_LIFETIME": "3h"}))
 	if c.HardCeiling != 6*time.Hour {
