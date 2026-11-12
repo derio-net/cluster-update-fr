@@ -1,0 +1,14 @@
+{{define "attach.html"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0;url={{.URL}}">
+<title>Attach to session</title>
+<style>body{margin:0;padding:2rem 16px;font:15px/1.5 system-ui,sans-serif;background:#fff;color:#1d2433}@media (prefers-color-scheme: dark){body{background:#11151c;color:#e6e9ef}a{color:#84adff}}</style>
+</head>
+<body>
+<p>{{.Msg}}</p>
+<p><a href="{{.URL}}">Open session {{.ID}} in runs-fr</a> · <a href="/">back to the console</a></p>
+</body>
+</html>{{end}}

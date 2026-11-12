@@ -1,0 +1,4 @@
+{"items": [
+  {"metadata": {"name": "mini-1"}, "status": {"nodeInfo": {"kubeletVersion": "v1.35.3", "osImage": "Talos (v1.12.6)"}, "conditions": [{"type": "Ready", "status": "True"}]}},
+  {"metadata": {"name": "gpu-1"}, "status": {"nodeInfo": {"kubeletVersion": "v1.35.3", "osImage": "Talos (v1.12.6)"}, "conditions": [{"type": "Ready", "status": "False"}]}}
+]}

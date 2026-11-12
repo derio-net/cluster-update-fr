@@ -1,0 +1,101 @@
+schema_version: 2
+phase:
+  number: 3
+  title: Update state machine, verification, history, alarms, report and metrics (R10,
+    R11, R12, R15, R16, R18, R26)
+  tag: agentic
+  depends_on:
+  - 2
+  tracking_issue: null
+  tier: standard
+  files:
+  - internal/store/**
+  - internal/verify/**
+  - internal/alarm/**
+  - internal/telegram/**
+  - internal/metrics/**
+  - testdata/**
+  - docs/superpowers/plans/**
+  estimate_lines: 1400
+tasks:
+- number: 1
+  title: Store, state machine and History (red → green)
+  steps:
+  - id: P3.T1.S1
+    text: |-
+      Write internal/store/store_test.go: Update records move pending → approved → merged → applied → verified, or to failed / rolled-back / held / abandoned; illegal transitions return an error; every transition appends a History event {at, by, from, to, reason, pr, rollout, verification}; failure states carry a named reason ("failed at step X, rolled back", "needs you"); the store persists atomically to STATE_DIR/state.json (write temp + rename) and reloads; a corrupt file is moved aside and the store starts empty with a logged warning, never a crash. Run: FAILS.
+  - id: P3.T1.S2
+    text: |-
+      Implement internal/store. Run: ok.
+- number: 2
+  title: Verification — applied means operationState, done means smoke (red → green)
+  steps:
+  - id: P3.T2.S1
+    text: |-
+      Write internal/verify/verify_test.go: a workload update is `applied` only when the Application's status.operationState.operation.sync.revision equals the merge SHA (a Synced status at another revision stays `merged`, shown as "rolled out, unverified"); `verified` only when every smoke check of smoke/<app>.yaml passes (http status + body regex, tcp connect; exec-probe is reported as operator-run); a failing check → failed with the check named. OS steps: verified when every node's Talos/kubelet version equals versions/<cluster>.yaml, all nodes Ready and the cluster's smoke checks pass; between merge and that point the inventory shows `declared, applying`. Rollouts apps report phase + paused/aborted (R18 read). Run: FAILS.
+  - id: P3.T2.S2
+    text: |-
+      Implement internal/verify (smoke runner with per-check timeout, bodies scrubbed before storing). Run: ok.
+- number: 3
+  title: Alarm state, Telegram and the daily report (red → green)
+  steps:
+  - id: P3.T3.S1
+    text: |-
+      Write internal/alarm/alarm_test.go and internal/telegram/telegram_test.go: one alarm record per vulnerability × component; a new finding at/above the threshold (default Critical, and High with a fixed version) alarms once; the same finding on the next scan sends nothing; it re-alarms only when the fix is released, severity rises, or it is still open past its deadline (once per deadline); resolved findings close the record silently. Telegram sends to chat id (string) with message_thread_id = the #security topic, parse_mode set explicitly (HTML with every value html-escaped), text scrubbed; missing token/chat/thread → no send, alarm state still advances and a metric records "unconfigured". Daily report: one message per day at REPORT_HOUR (default 08 UTC) summarising security/batch/countdowns/guided/held with the console link; nothing new → a single short line. Run: FAILS.
+  - id: P3.T3.S2
+    text: |-
+      Implement internal/alarm and internal/telegram. Run: ok.
+- number: 4
+  title: Metrics and leftover reconciliation (red → green → refactor)
+  steps:
+  - id: P3.T4.S1
+    text: |-
+      Write internal/metrics/metrics_test.go asserting the exposition contains exactly the names frank's dashboard reads: cluster_update_versions_behind{cluster,component}, cluster_update_vulns_open{cluster,severity}, cluster_update_last_report_timestamp_seconds, cluster_update_last_scan_timestamp_seconds, cluster_update_updates{state}, cluster_update_alarms{state}, with HELP/TYPE lines and escaped label values. Write store reconcile tests: a session pod with no live update, a stale renovate branch for a closed PR, an update stuck in approved past its timeout each end in a named state (abandoned / failed) with the cleanup action listed. Run: FAILS.
+  - id: P3.T4.S2
+    text: |-
+      Implement internal/metrics (hand-written text exposition, no client library) and store.Reconcile. Run: ok.
+  - id: P3.T4.S3
+    text: |-
+      Refactor: state names live in one enum used by store, metrics and the UI. Run `go test ./...`: ok.
+state:
+  steps:
+    P3.T1.S1:
+      state: x
+      ticked_at: '2026-10-31T19:51:33+00:00'
+      note: null
+    P3.T1.S2:
+      state: x
+      ticked_at: '2026-10-31T19:51:36+00:00'
+      note: null
+    P3.T2.S1:
+      state: x
+      ticked_at: '2026-10-31T19:53:45+00:00'
+      note: null
+    P3.T2.S2:
+      state: x
+      ticked_at: '2026-10-31T19:53:48+00:00'
+      note: null
+    P3.T3.S1:
+      state: x
+      ticked_at: '2026-10-31T19:55:52+00:00'
+      note: null
+    P3.T3.S2:
+      state: x
+      ticked_at: '2026-10-31T19:55:55+00:00'
+      note: null
+    P3.T4.S1:
+      state: x
+      ticked_at: '2026-10-31T19:56:36+00:00'
+      note: null
+    P3.T4.S2:
+      state: x
+      ticked_at: '2026-10-31T19:56:40+00:00'
+      note: null
+    P3.T4.S3:
+      state: x
+      ticked_at: '2026-10-31T19:56:43+00:00'
+      note: null
+  completion:
+    at: '2026-10-31T19:57:09+00:00'
+    note: null
+    observed_prs: []

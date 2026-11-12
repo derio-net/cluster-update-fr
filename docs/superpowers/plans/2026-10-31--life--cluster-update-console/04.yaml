@@ -1,0 +1,80 @@
+schema_version: 2
+phase:
+  number: 4
+  title: Disposable upgrade sessions (R20, R21, R22, R23, R29)
+  tag: agentic
+  depends_on:
+  - 3
+  tracking_issue: null
+  tier: hard
+  files:
+  - internal/session/**
+  - internal/kube/**
+  - testdata/**
+  - docs/superpowers/plans/**
+  estimate_lines: 1200
+tasks:
+- number: 1
+  title: Deterministic identity and per-target locks (red → green)
+  steps:
+  - id: P4.T1.S1
+    text: |-
+      Write internal/session/id_test.go and lock_test.go: SessionName(upgradeID) is a DNS-1123 name derived only from the upgrade id (sanitised + short sha256 suffix of the full id, never random), Secret names derive from it; Target(update) is `os:<cluster>` for frank-os/hop-os and `app:<cluster>/<app>` otherwise; Acquire(target, upgradeID) succeeds for the holder again (idempotent), refuses another upgrade naming the holder, survives a store reload; concurrent Acquire from 50 goroutines yields exactly one holder (`go test -race`). Run: FAILS.
+  - id: P4.T1.S2
+    text: |-
+      Implement. Run: ok.
+- number: 2
+  title: Pod and credential spec, create-if-absent (red → green)
+  steps:
+  - id: P4.T2.S1
+    text: |-
+      Write internal/session/launch_test.go with a fake kube: Start(update) for each type (chart-major, stateful, rollouts, frank-os, hop-os) builds a pod in namespace upgrade-sessions labelled fr.run/id=<upgrade-id> and cluster-update.fr/type=<type>, image SESSION_IMAGE pinned, runAsNonRoot, capabilities drop ALL, readOnlyRootFilesystem, emptyDir home, automountServiceAccountToken false unless the type needs the per-type SA (stateful/rollouts/chart-major → frank's per-type ServiceAccount `upgrade-session-<type>`), TALOSCTL_VERSION/KUBECTL_VERSION env from the step target, the brief + AGENTS.md/CLAUDE.md as a Secret volume; credentials are copied into a per-session Secret holding ONLY that type's keys (no type ever gets the Omni host); stateful/rollouts also create the per-upgrade RoleBinding from frank's template, named from the session name. A second Start finds the pod (GET 200) and returns it without creating anything (create-if-absent; a 409 on create is treated the same). Run: FAILS.
+  - id: P4.T2.S2
+    text: |-
+      Implement internal/session/launch.go (writes only via kube.Client's upgrade-sessions-restricted Create/Delete). Run: ok.
+- number: 3
+  title: Idle clock, lifetime, cleanup and scrubbed transcripts (red → green → refactor)
+  steps:
+  - id: P4.T3.S1
+    text: |-
+      Write internal/session/lifecycle_test.go with a fake clock: idle timeout (default 2h) fires only while no step is running — StepStarted pauses the clock, StepFinished restarts it from that moment; max lifetime (default 8h) warns once and does NOT end a session with a running step; End deletes the pod, its Secrets and RoleBinding, releases the lock, stores the transcript through scrub.String and the outcome in History; a pod found dead (Failed/missing) while the update is open ends as "needs you" with its leftovers deleted. Run: FAILS.
+  - id: P4.T3.S2
+    text: |-
+      Implement. Run: ok.
+  - id: P4.T3.S3
+    text: |-
+      Refactor: one cleanup function used by End, the reaper and store.Reconcile. Run `go test ./... -race`: ok.
+state:
+  steps:
+    P4.T1.S1:
+      state: x
+      ticked_at: '2026-10-31T19:58:42+00:00'
+      note: null
+    P4.T1.S2:
+      state: x
+      ticked_at: '2026-10-31T19:58:46+00:00'
+      note: null
+    P4.T2.S1:
+      state: x
+      ticked_at: '2026-10-31T20:07:54+00:00'
+      note: null
+    P4.T2.S2:
+      state: x
+      ticked_at: '2026-10-31T20:07:59+00:00'
+      note: null
+    P4.T3.S1:
+      state: x
+      ticked_at: '2026-10-31T20:08:07+00:00'
+      note: null
+    P4.T3.S2:
+      state: x
+      ticked_at: '2026-10-31T20:08:13+00:00'
+      note: null
+    P4.T3.S3:
+      state: x
+      ticked_at: '2026-10-31T20:08:17+00:00'
+      note: null
+  completion:
+    at: '2026-10-31T20:10:15+00:00'
+    note: null
+    observed_prs: []

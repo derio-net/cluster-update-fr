@@ -1,0 +1,16 @@
+{{define "inventory.html"}}{{template "head" .}}
+<h2>Inventory</h2>
+{{with .Inventory}}{{range .Grouped}}
+<h2>{{.Cluster}}</h2>
+<table>
+<tr><th>Service</th><th>Dependency</th><th>Declared</th><th>Running</th><th>Latest</th><th>Gap</th><th>Vulnerabilities</th><th>Path</th></tr>
+{{range .Services}}{{$svc := .Name}}{{range .Deps}}
+<tr><td>{{$svc}}</td><td>{{.Kind}} <code>{{.Name}}</code></td><td>{{or .Declared "—"}}</td>
+<td>{{if .Unknown}}<span class="warn">unknown</span>{{else}}{{or .Running "—"}}{{end}}{{if .Drift}} <span class="warn" title="{{.Note}}">≠ declared</span>{{end}}</td>
+<td>{{or .Latest "—"}}</td><td>{{or .Gap "—"}}</td>
+<td>{{range $sev, $n := .VulnCounts}}<span class="{{sevclass $sev}}">{{$n}} {{$sev}}</span> {{end}}</td>
+<td>{{pathlabel .Path}}</td></tr>
+{{end}}{{end}}
+</table>
+{{end}}{{else}}<p class="empty">The first scan has not finished yet.</p>{{end}}
+{{template "foot" .}}{{end}}
