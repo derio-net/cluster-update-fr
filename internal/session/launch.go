@@ -879,6 +879,12 @@ func (l *Launcher) podSpec(req Request, name string, labels map[string]string, d
 				{"name": "TS_STATE_DIR", "value": "/ts-state"},
 				{"name": "TS_SOCKET", "value": "/ts-state/tailscaled.sock"},
 				{"name": "TS_KUBE_SECRET", "value": ""},
+				// containerboot decides it runs in Kubernetes from KUBERNETES_SERVICE_HOST (the kubelet always
+				// injects it) and then builds a kube client that needs the service-account token files. This
+				// pod mounts none on purpose, and TS_KUBE_SECRET="" does not stop the client being built
+				// (tailscale v1.82.5 settings.go InKubernetes, main.go newKubeClient). An explicit empty
+				// container env overrides the injected value and keeps containerboot out of Kubernetes mode.
+				{"name": "KUBERNETES_SERVICE_HOST", "value": ""},
 				{"name": "TS_SOCKS5_SERVER", "value": TailscaleSOCKS},
 				{"name": "TS_OUTBOUND_HTTP_PROXY_LISTEN", "value": TailscaleHTTPProxy},
 				{"name": "TS_AUTHKEY", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": SecretName(req.UpgradeID), "key": TailscaleAuthKey}}},
