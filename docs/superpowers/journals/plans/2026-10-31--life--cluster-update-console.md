@@ -1,4 +1,4 @@
-<!-- fr:journal-schema=3 -->
+<!-- fr:journal-schema=4 -->
 # Journal: 2026-10-31--life--cluster-update-console
 
 <!-- fr:journal kind=discovery scope=plan id=no-refactor-because-P1.T1 created=2026-10-31T19:48:14+00:00 phase=1 -->

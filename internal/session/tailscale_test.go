@@ -52,7 +52,10 @@ func TestHopOSGetsAnIsolatedTailscaleSidecar(t *testing.T) {
 	}
 	te := envOf(ts)
 	for k, v := range map[string]string{"TS_USERSPACE": "true", "TS_SOCKS5_SERVER": "localhost:1055", "TS_OUTBOUND_HTTP_PROXY_LISTEN": "localhost:1056",
-		"TS_STATE_DIR": "/ts-state", "TS_KUBE_SECRET": ""} {
+		"TS_STATE_DIR": "/ts-state", "TS_KUBE_SECRET": "",
+		// containerboot enters Kubernetes mode on a non-empty KUBERNETES_SERVICE_HOST and then needs
+		// the service-account token files; this pod mounts none (automountServiceAccountToken:false).
+		"KUBERNETES_SERVICE_HOST": ""} {
 		if te[k] == nil || te[k]["value"] != v {
 			t.Errorf("sidecar %s = %v", k, te[k])
 		}
